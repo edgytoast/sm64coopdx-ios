@@ -152,6 +152,31 @@ fetch_all() {
     git -C "$SRC/coopnet" fetch -q origin
     git -C "$SRC/coopnet" checkout -q --force "$COOPNET_COMMIT"
     git -C "$SRC/coopnet" clean -qfd
+
+    # Upstream (LeoManrique) ships its iOS fixes BAKED INTO the prebuilt
+    # lib/coopnet/ios/libcoopnet.a, which we never link -- we build coopnet from
+    # source for xrOS right here. So a pin bump alone brings us only the
+    # game-side half of those fixes; this patch is the library half, and without
+    # it the lobby-list repair is inert (ns_coopnet_is_connected() can't go false
+    # because a dropped connection is never detected). Applied after the
+    # checkout+clean above, so it is idempotent across runs.
+    COOPNET_FIXES="$ROOT/vendor/sm64coopdx/lib/coopnet/ios/coopnet-ios-fixes.patch"
+    [[ -f "$COOPNET_FIXES" ]] || {
+        echo "FATAL: missing $COOPNET_FIXES" >&2
+        echo "       -> upstream vendors it at lib/coopnet/ios/; re-run scripts/bootstrap.sh." >&2
+        exit 1; }
+    # The patch is written against one exact coopnet commit. If either pin moves,
+    # fail loud rather than ship an archive that silently lost the fixes.
+    PATCH_BASE=$(grep -oE '^Base: coop-deluxe/coopnet @ [0-9a-f]{40}' "$COOPNET_FIXES" \
+                 | grep -oE '[0-9a-f]{40}')
+    [[ "$PATCH_BASE" == "$COOPNET_COMMIT" ]] || {
+        echo "FATAL: coopnet-ios-fixes.patch targets $PATCH_BASE but we pin $COOPNET_COMMIT" >&2
+        echo "       -> re-base the patch (or re-pin coopnet) before shipping." >&2
+        exit 1; }
+    say "patch coopnet (upstream iOS fixes: install-id fingerprint, SO_LINGER, drop detection)"
+    git -C "$SRC/coopnet" apply "$COOPNET_FIXES" || {
+        echo "FATAL: coopnet-ios-fixes.patch did not apply to $COOPNET_COMMIT" >&2; exit 1; }
+
     # coopnet's public header must stay identical to the one the game includes.
     diff -q "$SRC/coopnet/common/libcoopnet.h" \
             "$ROOT/vendor/sm64coopdx/lib/coopnet/include/libcoopnet.h" >/dev/null || {
@@ -255,6 +280,12 @@ build_coopnet() {
     # include that __APPLE__ already provides, and connection.cpp:108 -- the guard),
     # so it has no unwanted side effects. The Makefile's other OSX_BUILD effects
     # (dylib naming, -arch, -install_name) live in link rules we never invoke.
+    #
+    # coopnet-ios-fixes.patch (applied in fetch_all) keeps that guard but stops it
+    # from returning unconditionally: FIONREAD reads 0 for both "idle" and "peer
+    # closed", so the original guard meant a drop was NEVER noticed. It now probes
+    # with a 1-byte MSG_PEEK to tell the two apart. That is what makes the
+    # game-side lobby-list timeout able to see a dead connection.
     local f
     for f in "$SRC/coopnet/common"/*.cpp; do
         xcrun --sdk "$sdk" clang++ -target "$triple" -isysroot "$sysroot" \

@@ -48,7 +48,10 @@ if [[ "${2:-}" == "--sync-mirror" ]]; then
     echo "bump: re-syncing base mirror $BASE_MIRROR ..."
     T=$(mktemp -d)
     git clone --mirror "$UPSTREAM" "$T/m"
-    git -C "$T/m" push --mirror "$BASE_MIRROR"
+    # NOT --mirror: that also pushes refs/pull/*, which GitHub rejects as hidden
+    # refs, failing the whole push after the real refs already landed. Heads and
+    # tags are the entire fallback contract.
+    git -C "$T/m" push --force "$BASE_MIRROR" 'refs/heads/*:refs/heads/*' 'refs/tags/*:refs/tags/*'
     rm -rf "$T"
     echo "bump: base mirror synced."
 fi

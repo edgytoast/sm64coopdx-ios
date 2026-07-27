@@ -24,10 +24,16 @@ TEAM="${SM64_IOS_TEAM:-57G8J46Z2T}"
 # MARKETING version (CFBundleShortVersionString) — the PUBLIC, curated semver.
 # Must equal the git tag + GitHub release string AT RELEASE TIME, or SideStore
 # never offers the update (it string-compares this against the source JSON).
-# PINNED to the next public target while iterating — bump BUILD_NUMBER per test
-# build, NOT this — so public numbers stay contiguous (App-Store style). Set
-# SM64_MARKETING_VERSION explicitly when cutting a release (1.2.0 feature, 1.1.2 fix).
-MARKETING_VERSION="${SM64_MARKETING_VERSION:-1.2.0}"
+# PINNED to the version currently being shipped. THE VERSIONING RULES (Austin,
+# 2026-07-27) — see docs/VERSIONING.md:
+#   - Small update (upstream fold-in, bugfix): bump the PATCH component only,
+#     1.1.1 -> 1.1.2. Do not jump minor/major for routine work.
+#   - The OTA version and the GitHub release version MUST MATCH. One number,
+#     both places, every public release.
+#   - OTA-only local dev builds (iterating with no GitHub release) get a FOURTH
+#     component: 1.1.2.1, 1.1.2.2, ... They stay OTA-only until one is worth
+#     releasing, at which point it becomes the next public 3-component version.
+MARKETING_VERSION="${SM64_MARKETING_VERSION:-1.1.2}"
 # BUILD number (CFBundleVersion) — churns per build, DISTINCT from the marketing
 # version, so many test builds can iterate under one pinned marketing version.
 # Monotonic default = git commit count; override with SM64_BUILD_NUMBER for

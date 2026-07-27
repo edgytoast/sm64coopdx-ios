@@ -16,7 +16,7 @@
 set -uo pipefail
 
 UDID=33150978-17BA-42B6-9EC7-3C2DD54273E1   # sm64vp-xros265 — OUR sim (charter: never boot sims you don't own)
-BUNDLE=com.sm64coopdx.ios
+BUNDLE=com.rebelancap.sm64coopdx
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 APP="$ROOT/build-vision-sim/Release-xrsimulator/sm64coopdx.app"
 ROM="$HOME/dev/libsm64visionos/baserom.us.z64"

@@ -70,7 +70,7 @@ static BOOL sm64_use_feet(void) {
 
 // Human-readable value text, honouring the m/ft toggle.
 static NSString *sm64_value_text(NSString *key, float v) {
-    if ([key isEqualToString:@"dim"]) {
+    if ([key isEqualToString:@"dim"] || [key isEqualToString:@"vrDim"]) {
         // Surroundings Dimming is a 0..100% control.
         return [NSString stringWithFormat:@"%.0f%%", v * 100.0f];
     }
@@ -177,6 +177,11 @@ static __weak SM64SettingsVC *g_settingsVC = nil;
         mkrow(@"World Scale", @"vrScale", SM64_ROW_SLIDER, 300.0, 6000.0, SM64_DEF_VRSCALE),
         mkrow(@"World Distance", @"vrDist", SM64_ROW_SLIDER, 0.3, 3.0, SM64_DEF_VRDIST),
         mkrow(@"World Height", @"vrHeight", SM64_ROW_SLIDER, -1.5, 0.5, SM64_DEF_VRHEIGHT),
+        // "Full VR" is deliberately NOT a button any more (Austin: that name
+        // should mean first-person immersion, not "the room is hidden").
+        // Hiding the room is just this slider at 100%, which is the default.
+        mkrow(@"Surroundings Dimming", @"vrDim", SM64_ROW_SLIDER, 0.0, 1.0, SM64_DEF_VRDIM),
+        mkrow(@"World Lock", @"vrLock", SM64_ROW_SWITCH, 0, 1, SM64_DEF_VRWORLDLOCK),
         mkrow(@"Recenter VR World", @"vrRecenter", SM64_ROW_BUTTON, 0, 0, 0),
         mkrow(@"Dump Eye Images", @"vrDump", SM64_ROW_BUTTON, 0, 0, 0),
     ] ];
@@ -209,7 +214,7 @@ static __weak SM64SettingsVC *g_settingsVC = nil;
 
 - (void)resetVision3D {
     for (NSString *k in @[ @"dist", @"halfW", @"halfH", @"posH", @"sep", @"conv", @"convAuto", @"dim",
-                           @"vrStereo", @"vrScale", @"vrDist", @"vrHeight", @"vrRender" ]) {
+                           @"vrStereo", @"vrScale", @"vrDist", @"vrHeight", @"vrRender", @"vrDim", @"vrLock" ]) {
         [NSUserDefaults.standardUserDefaults
             removeObjectForKey:[@"sm64vp3d." stringByAppendingString:k]];
     }

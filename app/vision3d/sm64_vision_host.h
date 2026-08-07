@@ -54,10 +54,12 @@
 #define SM64_DEF_VRSCALE  1376.0f // game units per metre (bigger = smaller world)
 #define SM64_DEF_VRDIST   0.60f   // metres in front of the frozen head (donor ships 0.25; Austin's device report was "very close up to my face", so the FIRST look starts further out and the slider goes back down to 0.30)
 #define SM64_DEF_VRHEIGHT (-0.35f)// metres relative to eye level
-#define SM64_DEF_VRRENDER 0.75f   // eye render size as a fraction of the per-eye view.
+#define SM64_DEF_VRRENDER 0.85f   // eye render size as a fraction of the per-eye view.
                                   // 1.0 is 1:1 with the compositor at ~2.5x today's GPU
                                   // cost; below 1.0 upsamples and shows jaggies. The flat
                                   // panel supersamples 2.7x, which is why it looks better.
+#define SM64_DEF_VRWORLDLOCK 1.0f // 1 = look around the world; 0 = it follows your head
+#define SM64_DEF_VRDIM    1.00f   // surroundings dimming; 1.0 = no passthrough (Austin's default)
 #define SM64_DEF_VRSTEREO 1.00f   // eye offset as a fraction of the true IPD. 1.0 is the
                                   // GEOMETRICALLY TRUE setting and is now the default: with each
                                   // eye's canted frustum intact, anything below 1.0 is just a

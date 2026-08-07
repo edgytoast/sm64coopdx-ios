@@ -70,6 +70,14 @@ void sm64_vr_spike_recenter(void);
 // upsamples (jaggies); above 1.0 supersamples. The donor ships 0.4-1.0.
 void sm64_vr_spike_set_render_scale(float scale);
 
+// World lock: the placement stays anchored in the room and the VIEW follows the
+// live head pose. Off = the frozen view, which reads as head-locked.
+void sm64_vr_spike_set_world_lock(int on);
+
+// Surroundings dimming, 0..1 on the UI scale (perceptual curve applied inside).
+// 1.0 = no passthrough. This replaces the "Full VR" button.
+void sm64_vr_spike_set_dim(float dim);
+
 // The VR eye-texture size, so gfx_metal and gfx_pc can both size from the VIEW
 // instead of the flat panel's budget. Returns 0 when VR is not driving.
 int sm64_vr_spike_render_size(int *w, int *h);

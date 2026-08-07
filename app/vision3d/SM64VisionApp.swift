@@ -182,11 +182,6 @@ struct SM64RootView: View {
                             sm64_vr_spike_enter(model.vrSpike == 0 ? 2 : 0)
                         }
                     }
-                    if model.vrSpike != 0 {
-                        Button(model.vrSpikeFull ? "Passthrough" : "Full VR") {
-                            SM64_SetVRSpikeStyleFull(!model.vrSpikeFull)
-                        }
-                    }
                     Button { model.showSettings = true } label: {
                         Image(systemName: "gearshape.fill")
                     }
@@ -247,9 +242,16 @@ struct SM64RootView: View {
                         if case .error = r {
                             sm64_vr_spike_enter(0) // roll the engine back out of offscreen mode
                         } else {
+                            // Austin, 2026-08-07: "the SOUND follows where the black
+                            // playing-in-VR little window is ... move the window to my
+                            // left and the audio comes from my left." The 3D path has
+                            // always anchored the stage to the user's FRONT; the spike
+                            // never did, so the stage stayed on the parked 2D window.
+                            sm64SetAudioFrontStage(true)
                             sm64_3d_park_window()
                         }
                     } else {
+                        sm64SetAudioFrontStage(false)
                         sm64_3d_exit_finalize()
                     }
                 }

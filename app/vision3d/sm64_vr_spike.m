@@ -112,6 +112,28 @@ int sm64_vr_spike_render_size(int *w, int *h) {
     return 1;
 }
 
+// WORLD LOCK (Austin, 2026-08-07: "add a toggle to headlock or not"). This is
+// the R0->R1 line: the PLACEMENT stays frozen in the room (that is what makes
+// the diorama stay put), but the VIEW is rebuilt from the LIVE head pose every
+// frame, so turning your head looks around the world instead of dragging it with
+// you. Off = the frozen view R0 shipped with, which reads as head-locked.
+static int sVrWorldLock = 1;
+
+// Surroundings dimming, same control the flat 3D panel has. Replaces the "Full
+// VR" button: Austin's note is that Full VR should mean first-person immersion,
+// not "the room is hidden", and hiding the room is just this slider at 100%.
+// Default 1.0 = no passthrough.
+static float sVrDim = 1.0f;
+
+void sm64_vr_spike_set_world_lock(int on) { sVrWorldLock = on ? 1 : 0; }
+
+void sm64_vr_spike_set_dim(float dim) {
+    dim = (dim < 0.0f) ? 0.0f : (dim > 1.0f ? 1.0f : dim);
+    // Same perceptual curve as the panel's dimming: a LINEAR slider "doesn't
+    // really get dark until 80%", measured on a human (sm64_immersive.m).
+    sVrDim = 1.0f - powf(1.0f - dim, 2.2f);
+}
+
 void sm64_vr_spike_set_tunables(float scale, float dist, float height, float stereo) {
     if (scale  >= 100.0f && scale <= 20000.0f) { sVrScale  = scale;  }
     if (dist   >= -1.0f  && dist  <= 5.0f)     { sVrDist   = dist;   }
@@ -317,7 +339,8 @@ static simd_float4x4 sm64_vr_placement(simd_float4x4 frozenHead) {
 // sliders move the world while you drag them. The POSE is still frozen: this is
 // R0, and keeping the pose out of the loop means a world that looks wrong is a
 // matrix or a number, never pose plumbing.
-static void sm64_vr_build_matrices(cp_drawable_t drawable, simd_float4x4 frozenHead, bool logIt) {
+static void sm64_vr_build_matrices(cp_drawable_t drawable, simd_float4x4 frozenHead,
+                                   simd_float4x4 liveHead, bool logIt) {
     const float invS = 1.0f / sVrScale;
     simd_float4x4 scale = matrix_identity_float4x4;
     scale.columns[0].x = invS; scale.columns[1].y = invS; scale.columns[2].z = invS;
@@ -363,7 +386,11 @@ static void sm64_vr_build_matrices(cp_drawable_t drawable, simd_float4x4 frozenH
         simd_float3 scaled = centre + (eyePos - centre) * sVrStereo;
         deviceFromEye.columns[3] = simd_make_float4(scaled, 1.0f);
 
-        simd_float4x4 eyeFromOrigin = simd_inverse(simd_mul(frozenHead, deviceFromEye));
+        // The PLACEMENT (A, above) uses the frozen head — that is the anchor in
+        // the room. The VIEW uses the LIVE head when world lock is on, which is
+        // the whole difference between looking around a world and wearing it.
+        simd_float4x4 viewHead = sVrWorldLock ? liveHead : frozenHead;
+        simd_float4x4 eyeFromOrigin = simd_inverse(simd_mul(viewHead, deviceFromEye));
         simd_float4x4 cpProj = matrix_identity_float4x4;
         if (__builtin_available(visionOS 2.0, *)) {
             cpProj = cp_drawable_compute_projection(
@@ -451,13 +478,28 @@ static NSString *const kSM64VRShader =
      "  if (all(c.rgb < 0.02)) { discard_fragment(); }\n"
      "  if (srgbDecode > 0.5) { c.rgb = pow(c.rgb, float3(2.2)); }\n"
      "  return float4(c.rgb, 1.0);\n"
+     "}\n"
+     // Surroundings dimming: a black layer at the given alpha, drawn UNDER the
+     // world so the room fades out behind it. At 1.0 there is no passthrough
+     // left, which is what "no passthrough" means without a second space.
+     "vertex float4 vr_dim_vs(uint vid [[vertex_id]], constant float& depth [[buffer(0)]]) {\n"
+     "  const float2 p[3] = { float2(-1,-1), float2(3,-1), float2(-1,3) };\n"
+     "  return float4(p[vid], depth, 1.0);\n"
+     "}\n"
+     "fragment float4 vr_dim_fs(constant float& dim [[buffer(0)]]) {\n"
+     "  return float4(0.0, 0.0, 0.0, dim);\n"
      "}\n";
 
 static id<MTLRenderPipelineState> sVrPipeline;
+static id<MTLRenderPipelineState> sVrDimPipeline;
 static id<MTLDepthStencilState> sVrDepthState;
 // Mipmapped per-eye copies, latched as an atomic pair (see the copy site).
 static id<MTLTexture> sVrEyeCopy[2];
 static uint32_t sVrLastGen = 0;
+// The anchor each pair was rendered from: pending = published this frame (the
+// engine is rendering with it now), shown = the one the pair on screen came from.
+static ar_device_anchor_t sVrPendingAnchor = nil;
+static ar_device_anchor_t sVrShownAnchor = nil;
 
 static void sm64_vr_build_pipeline(id<MTLDevice> dev, MTLPixelFormat colorFmt, MTLPixelFormat depthFmt) {
     NSError *err = nil;
@@ -474,6 +516,19 @@ static void sm64_vr_build_pipeline(id<MTLDevice> dev, MTLPixelFormat colorFmt, M
     dd.depthCompareFunction = MTLCompareFunctionAlways;
     dd.depthWriteEnabled = YES; // the compositor reprojects on depth and rejects what it cannot read
     sVrDepthState = [dev newDepthStencilStateWithDescriptor:dd];
+
+    MTLRenderPipelineDescriptor *dp = [MTLRenderPipelineDescriptor new];
+    dp.vertexFunction = [lib newFunctionWithName:@"vr_dim_vs"];
+    dp.fragmentFunction = [lib newFunctionWithName:@"vr_dim_fs"];
+    dp.colorAttachments[0].pixelFormat = colorFmt;
+    dp.colorAttachments[0].blendingEnabled = YES;
+    dp.colorAttachments[0].sourceRGBBlendFactor = MTLBlendFactorSourceAlpha;
+    dp.colorAttachments[0].destinationRGBBlendFactor = MTLBlendFactorOneMinusSourceAlpha;
+    dp.colorAttachments[0].sourceAlphaBlendFactor = MTLBlendFactorOne;
+    dp.colorAttachments[0].destinationAlphaBlendFactor = MTLBlendFactorOne;
+    dp.depthAttachmentPixelFormat = depthFmt;
+    sVrDimPipeline = [dev newRenderPipelineStateWithDescriptor:dp error:&err];
+    if (!sVrDimPipeline) { NSLog(@"[vrspike] dim pipeline FAILED: %@", err.localizedDescription); }
     NSLog(@"[vrspike] world pipeline built (colorFmt=%lu depthFmt=%lu)",
           (unsigned long)colorFmt, (unsigned long)depthFmt);
 }
@@ -568,6 +623,7 @@ void sm64_vr_spike_run(void *layer_renderer_ptr, int variant) {
     }
     sVrValid = 0;
     sVrEyeCopy[0] = sVrEyeCopy[1] = nil;
+    sVrPendingAnchor = sVrShownAnchor = nil;
     sVrLastGen = sm64_metal_get_3d_pair_gen(); // wait for a pair rendered THIS session
     bool frozenSet = false;
     simd_float4x4 frozenHead = matrix_identity_float4x4;
@@ -607,12 +663,6 @@ void sm64_vr_spike_run(void *layer_renderer_ptr, int variant) {
             cp_frame_start_update(frame);
             cp_frame_end_update(frame);
             cp_time_wait_until(cp_frame_timing_get_optimal_input_time(timing));
-            // Release the engine's next paced frame here, exactly as the 3D loop
-            // does. WITHOUT this the engine's wait in
-            // produce_interpolation_frames_and_delay() times out at 50 ms and it
-            // renders at ~20 Hz into a 90 Hz compositor — stale eye pairs, which
-            // is its own source of "doubled" on anything that moves.
-            sm64_3d_pace_signal_now();
             cp_frame_start_submission(frame);
 
 #pragma clang diagnostic push
@@ -646,28 +696,46 @@ void sm64_vr_spike_run(void *layer_renderer_ptr, int variant) {
             ar_device_anchor_t anchor = ar_device_anchor_create();
             ar_device_anchor_query_status_t anchorStatus =
                 ar_world_tracking_provider_query_device_anchor_at_timestamp(wtp, presTime, anchor);
-            cp_drawable_set_device_anchor(drawable, anchor);
+            // (submitted below, once we know which pair this frame shows)
 
             // R0.2: freeze the pose ONCE tracking has converged (ARKit's first
             // frames answer success with a near-identity pose — the same trap
             // that put the 3D panel on the floor), then compose EyeVP and hand
             // it to the engine. Frozen, so nothing after this depends on pose
             // plumbing.
+            simd_float4x4 liveHead = ar_device_anchor_get_origin_from_anchor_transform(anchor);
             if (sVrWorld && (!frozenSet || sVrRefreeze) && frames > 30 &&
                 anchorStatus == ar_device_anchor_query_status_success) {
                 sVrRefreeze = 0;
-                frozenHead = ar_device_anchor_get_origin_from_anchor_transform(anchor);
+                frozenHead = liveHead;
                 frozenSet = true;
-                NSLog(@"[vrspike] pose FROZEN at head (%.2f,%.2f,%.2f)",
+                NSLog(@"[vrspike] world ANCHORED at head (%.2f,%.2f,%.2f) worldLock=%d",
                       (double)frozenHead.columns[3].x, (double)frozenHead.columns[3].y,
-                      (double)frozenHead.columns[3].z);
-                sm64_vr_build_matrices(drawable, frozenHead, true);
+                      (double)frozenHead.columns[3].z, sVrWorldLock);
+                sm64_vr_build_matrices(drawable, frozenHead, liveHead, true);
             } else if (sVrWorld && frozenSet) {
-                // Every frame: the pose stays frozen, but the TUNABLES are live,
-                // so dragging a slider moves the world while you look at it —
-                // the donor's whole "tuned by feel" workflow.
-                sm64_vr_build_matrices(drawable, frozenHead, false);
+                // Every frame: the world's PLACEMENT stays anchored where it was
+                // put, the VIEW follows the live head (when world lock is on), and
+                // the tunables are live so dragging a slider moves the world while
+                // you look at it — the donor's "tuned by feel" workflow.
+                sm64_vr_build_matrices(drawable, frozenHead, liveHead, false);
             }
+
+            // THE POSE WE RENDER WITH MUST BE THE POSE WE SUBMIT (donor ledger:
+            // "world shakes with head sway"). The engine renders its pair AFTER
+            // this frame's signal, so the pair we are about to SHOW was built
+            // from the anchor we published on a PREVIOUS frame — submit that one,
+            // and let the compositor reproject the difference. Submitting the
+            // live anchor for a frame rendered from an older pose is exactly the
+            // mismatch that reads as the world swimming with your head.
+            if (anchorStatus == ar_device_anchor_query_status_success) {
+                sVrPendingAnchor = anchor;
+            }
+            // Release the engine's next paced frame only NOW, after this frame's
+            // matrices are published, so it renders with them and not with the
+            // previous frame's pose. Without any signal at all the engine falls
+            // back to its 50 ms timeout — ~20 Hz into a 90 Hz compositor.
+            sm64_3d_pace_signal_now();
 
             id<MTLCommandBuffer> cb = [queue commandBuffer];
 
@@ -682,6 +750,10 @@ void sm64_vr_spike_run(void *layer_renderer_ptr, int variant) {
                 uint32_t gen = sm64_metal_get_3d_pair_gen();
                 if (gen != sVrLastGen) {
                     sVrLastGen = gen;
+                    // This pair was rendered from the matrices published on the
+                    // frame whose anchor is still pending — that is the pose to
+                    // present it against.
+                    sVrShownAnchor = sVrPendingAnchor;
                     for (int e = 0; e < 2; e++) {
                         id<MTLTexture> src =
                             (__bridge id<MTLTexture>)sm64_metal_get_3d_eye_texture(e + 1);
@@ -716,6 +788,9 @@ void sm64_vr_spike_run(void *layer_renderer_ptr, int variant) {
                 sm64_vr_write_png(sVrEyeCopy[0], queue, @"vr-eye-L.png");
                 sm64_vr_write_png(sVrEyeCopy[1], queue, @"vr-eye-R.png");
             }
+
+            cp_drawable_set_device_anchor(drawable,
+                (sVrWorld && sVrShownAnchor != nil) ? sVrShownAnchor : anchor);
 
             size_t views = cp_drawable_get_view_count(drawable);
             for (size_t v = 0; v < views; v++) {
@@ -752,6 +827,19 @@ void sm64_vr_spike_run(void *layer_renderer_ptr, int variant) {
                 }
                 id<MTLRenderCommandEncoder> enc = [cb renderCommandEncoderWithDescriptor:pass];
                 [enc setViewport:vp];
+
+                // Surroundings dimming, UNDER the world (the world's near-black
+                // fragments are discarded, so whatever is behind them shows —
+                // the room at 0, black at 1).
+                if (sVrWorld && sVrDim > 0.003f && sVrDimPipeline) {
+                    float dimDepth = 0.0001f;   // reverse-Z: ~far, behind everything
+                    float dimNow = sVrDim;
+                    [enc setRenderPipelineState:sVrDimPipeline];
+                    [enc setDepthStencilState:sVrDepthState];
+                    [enc setVertexBytes:&dimDepth length:sizeof(dimDepth) atIndex:0];
+                    [enc setFragmentBytes:&dimNow length:sizeof(dimNow) atIndex:0];
+                    [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+                }
 
                 // R0.2: paint this eye's engine render over the whole slice.
                 if (sVrWorld && sVrValid && sVrPipeline) {

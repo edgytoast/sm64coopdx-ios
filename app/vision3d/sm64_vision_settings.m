@@ -102,6 +102,14 @@ static NSString *sm64_value_text(NSString *key, float v) {
     if ([key isEqualToString:@"vrStereo"]) {
         return [NSString stringWithFormat:@"%.0f%% IPD", v * 100.0f];
     }
+    if ([key isEqualToString:@"vrRender"]) {
+        // Report the real texture, not the slider: "measure, don't infer".
+        int rw = 0, rh = 0;
+        if (sm64_vr_spike_render_size(&rw, &rh)) {
+            return [NSString stringWithFormat:@"%.0f%% (%dp)", v * 100.0f, rh];
+        }
+        return [NSString stringWithFormat:@"%.0f%%", v * 100.0f];
+    }
     if ([key isEqualToString:@"vrScale"]) {
         float span = (v > 1.0f) ? (8000.0f / v) : 0.0f;
         return sm64_use_feet() ? [NSString stringWithFormat:@"%.0f ft world", span * 3.28084f]
@@ -161,17 +169,15 @@ static __weak SM64SettingsVC *g_settingsVC = nil;
         // is still the fastest diagnostic in the sheet: at 0% the image must go
         // FLAT BUT SINGLE, and if it does not, the frustum/rotation pairing is
         // still wrong and nothing downstream is worth tuning.
+        // Sharpness. The flat panel supersamples 2.7x; VR spreads the same
+        // pixels over the whole field of view, so below 1.0 this upsamples
+        // and the engine (which has no MSAA) shows every jagged edge.
+        mkrow(@"Render Scale", @"vrRender", SM64_ROW_SLIDER, 0.4, 1.2, SM64_DEF_VRRENDER),
         mkrow(@"Stereo Strength", @"vrStereo", SM64_ROW_SLIDER, 0.0, 1.0, SM64_DEF_VRSTEREO),
         mkrow(@"World Scale", @"vrScale", SM64_ROW_SLIDER, 300.0, 6000.0, SM64_DEF_VRSCALE),
         mkrow(@"World Distance", @"vrDist", SM64_ROW_SLIDER, 0.3, 3.0, SM64_DEF_VRDIST),
         mkrow(@"World Height", @"vrHeight", SM64_ROW_SLIDER, -1.5, 0.5, SM64_DEF_VRHEIGHT),
         mkrow(@"Recenter VR World", @"vrRecenter", SM64_ROW_BUTTON, 0, 0, 0),
-        // The doubling ladder (see sm64_vr_spike.m). Test A: Force Mono — if it
-        // STILL doubles with both eyes showing identical pixels, the cause is not
-        // stereo pairing. Test B: Swap Eyes — if THAT fuses, view 0 is not the
-        // left eye. Both default off.
-        mkrow(@"Test A: Force Mono", @"vrMono", SM64_ROW_SWITCH, 0, 1, 0),
-        mkrow(@"Test B: Swap Eyes", @"vrSwap", SM64_ROW_SWITCH, 0, 1, 0),
         mkrow(@"Dump Eye Images", @"vrDump", SM64_ROW_BUTTON, 0, 0, 0),
     ] ];
 }
@@ -203,7 +209,7 @@ static __weak SM64SettingsVC *g_settingsVC = nil;
 
 - (void)resetVision3D {
     for (NSString *k in @[ @"dist", @"halfW", @"halfH", @"posH", @"sep", @"conv", @"convAuto", @"dim",
-                           @"vrStereo", @"vrScale", @"vrDist", @"vrHeight" ]) {
+                           @"vrStereo", @"vrScale", @"vrDist", @"vrHeight", @"vrRender" ]) {
         [NSUserDefaults.standardUserDefaults
             removeObjectForKey:[@"sm64vp3d." stringByAppendingString:k]];
     }

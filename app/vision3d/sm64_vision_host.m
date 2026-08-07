@@ -101,8 +101,7 @@ void sm64_3d_apply_settings(void) {
                                sm64_3d_setting_f("vrDist", SM64_DEF_VRDIST),
                                sm64_3d_setting_f("vrHeight", SM64_DEF_VRHEIGHT),
                                sm64_3d_setting_f("vrStereo", SM64_DEF_VRSTEREO));
-    sm64_vr_spike_set_flags((int)(sm64_3d_setting_f("vrSwap", 0.0f) > 0.5f),
-                            (int)(sm64_3d_setting_f("vrMono", 0.0f) > 0.5f));
+    sm64_vr_spike_set_render_scale(sm64_3d_setting_f("vrRender", SM64_DEF_VRRENDER));
 }
 
 // ---------------------------------------------------------------------------

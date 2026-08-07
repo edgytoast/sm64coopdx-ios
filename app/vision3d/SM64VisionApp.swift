@@ -37,7 +37,10 @@ func SM64_SetVRSpikeMode(_ variant: Int32) {
 
 @_cdecl("SM64_SetVRSpikeStyleFull")
 func SM64_SetVRSpikeStyleFull(_ full: Bool) {
-    DispatchQueue.main.async { SM64AppModel.shared.vrSpikeFull = full }
+    DispatchQueue.main.async {
+        SM64AppModel.shared.vrSpikeFull = full
+        NSLog("[vrspike] Swift: style -> \(full ? ".full" : ".mixed") (published)")
+    }
 }
 
 // Called from sm64_vision_host.m to flip the SwiftUI state that actually
@@ -347,7 +350,10 @@ struct SM64VisionApp: App {
         // switched live. A computed Binding rather than @State so the loop can
         // drive it from C through the published flag.
         .immersionStyle(selection: Binding<ImmersionStyle>(
-            get: { model.vrSpikeFull ? .full : .mixed },
+            get: {
+                NSLog("[vrspike] Swift: immersionStyle READ -> \(model.vrSpikeFull ? ".full" : ".mixed")")
+                return model.vrSpikeFull ? .full : .mixed
+            },
             set: { _ in }), in: .mixed, .full)
 
         ImmersiveSpace(id: "SM64-VR-FULL") {

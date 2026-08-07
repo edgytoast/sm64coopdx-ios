@@ -66,10 +66,13 @@ void sm64_vr_spike_set_tunables(float scale, float dist, float height, float ste
 // Re-freeze the head pose on the next tracked frame ("Recenter VR World").
 void sm64_vr_spike_recenter(void);
 
-// The doubling diagnostic ladder — see the .m. swapEyes gives each view the
-// other eye's finished image; forceMono gives both views the LEFT one. Neither
-// touches the matrices.
-void sm64_vr_spike_set_flags(int swapEyes, int forceMono);
+// Eye render resolution as a fraction of the per-eye logical viewport. Below 1.0
+// upsamples (jaggies); above 1.0 supersamples. The donor ships 0.4-1.0.
+void sm64_vr_spike_set_render_scale(float scale);
+
+// The VR eye-texture size, so gfx_metal and gfx_pc can both size from the VIEW
+// instead of the flat panel's budget. Returns 0 when VR is not driving.
+int sm64_vr_spike_render_size(int *w, int *h);
 
 // Write both ENGINE eye textures to Documents as vr-eye-L/R.png. Also fires once
 // automatically a few seconds into each VR entry, so the artifact exists without

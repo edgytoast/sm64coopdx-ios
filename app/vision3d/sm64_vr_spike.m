@@ -68,26 +68,48 @@ static float sVrHeight = -0.35f;  // metres relative to eye level
 static float sVrStereo = 1.00f;   // eye offset as a fraction of the true IPD (1.0 = geometrically true)
 static const float kVrClipMargin = 0.30f; // donor sClipMargin: minimum anchor standoff
 
-// ---------------------------------------------------------------------------
-// The diagnostic ladder for the doubling (2026-08-07). Each rung has a
-// PREDICTED signature, so one headset round answers which hypothesis is live
-// instead of iterating on guesses:
-//
-//   FORCE MONO — feed BOTH drawable views the LEFT eye's image. The two views
-//     then carry identical pixels, so any doubling that SURVIVES is not stereo
-//     pairing at all (it would be inside one eye's image, or the compositor's
-//     own presentation) and every stereo hypothesis below is dead.
-//   SWAP EYES — give each view the other eye's image. If this FUSES, then view 0
-//     is not the left eye and the whole pairing is simply inverted.
-//
-// Both default OFF and neither changes the matrices — they only re-route which
-// finished texture a view samples, so nothing else moves underneath the test.
-static int sVrSwapEyes = 0;
-static int sVrForceMono = 0;
+static float sVrEyeVP[2][4][4];
+static float sVrHudVP[2][4][4];
+static volatile int sVrValid = 0;      // read by the ENGINE thread
+static int sVrWorld = 0;               // world mode on (vs the clear-only probe)
 
-void sm64_vr_spike_set_flags(int swapEyes, int forceMono) {
-    sVrSwapEyes = swapEyes ? 1 : 0;
-    sVrForceMono = forceMono ? 1 : 0;
+// ---------------------------------------------------------------------------
+// EYE RESOLUTION (Austin, 2026-08-07: "quality is a little jagged — not as good
+// as old 3D stereo mode"). Measured, and he was right about the cause:
+//
+//   3D panel : engine 3840x2160 onto a ~1400x790 footprint = 2.7x SUPERsampling
+//   VR       : the same texture across a 5087x4081 per-eye view = 0.75x across,
+//              0.53x DOWN — upsampling, and the engine has no MSAA, so every
+//              jagged edge is magnified instead of averaged away.
+//
+// Foveation is not the problem: it is on and correct (device contract reads
+// foveation=1, ratemaps=2, and each view's own map is attached). The problem is
+// that the panel's pixel budget was never meant to cover a whole field of view.
+//
+// So VR sizes its own eye textures: the view's LOGICAL viewport (what the
+// compositor rasterizes against, and ~1:1 with physical pixels at the centre
+// where you are looking) times a render scale. Fixing the ASPECT alone is free —
+// the old 16:9 texture wasted width and starved height on a 1.25 view.
+static volatile int sVrViewW = 0, sVrViewH = 0;   // per-eye logical viewport
+static float sVrRenderScale = 0.75f;              // donor ships a 0.4-1.0 slider
+
+void sm64_vr_spike_set_render_scale(float s) {
+    if (s >= 0.3f && s <= 1.3f) { sVrRenderScale = s; }
+}
+
+// The size gfx_metal allocates and gfx_pc renders at, in VR. Returns 0 when VR
+// is not driving, so the panel path keeps its own sizing untouched.
+int sm64_vr_spike_render_size(int *w, int *h) {
+    int vw = sVrViewW, vh = sVrViewH;
+    if (!sVrValid || vw < 64 || vh < 64) { return 0; }
+    int rw = (int)(vw * sVrRenderScale), rh = (int)(vh * sVrRenderScale);
+    rw = ((rw + 64) / 128) * 128;   // quantise so a slider DRAG cannot thrash
+    rh = ((rh + 64) / 128) * 128;   // the texture allocation every pixel
+    if (rw < 640) { rw = 640; }
+    if (rh < 640) { rh = 640; }
+    if (w) { *w = rw; }
+    if (h) { *h = rh; }
+    return 1;
 }
 
 void sm64_vr_spike_set_tunables(float scale, float dist, float height, float stereo) {
@@ -104,10 +126,6 @@ void sm64_vr_spike_set_tunables(float scale, float dist, float height, float ste
 static volatile int sVrRefreeze = 0;
 void sm64_vr_spike_recenter(void) { sVrRefreeze = 1; }
 
-static float sVrEyeVP[2][4][4];
-static float sVrHudVP[2][4][4];
-static volatile int sVrValid = 0;      // read by the ENGINE thread
-static int sVrWorld = 0;               // world mode on (vs the clear-only probe)
 
 // The head-locked HUD plane (charter A6): how far ahead the 2D layer sits, and
 // how wide it is there. 1.5 m is the charter's number; the half-width gives the
@@ -312,6 +330,17 @@ static void sm64_vr_build_matrices(cp_drawable_t drawable, simd_float4x4 frozenH
 
     size_t views = cp_drawable_get_view_count(drawable);
 
+    // Publish the logical viewport so the eye textures can be sized from the
+    // VIEW rather than from the flat panel's budget.
+    {
+        MTLViewport vp0 = cp_view_texture_map_get_viewport(
+            cp_view_get_view_texture_map(cp_drawable_get_view(drawable, 0)));
+        if (vp0.width > 64 && vp0.height > 64) {
+            sVrViewW = (int)vp0.width;
+            sVrViewH = (int)vp0.height;
+        }
+    }
+
     // Cyclopean centre of the eyes in DEVICE space, so the stereo scale shrinks
     // the offsets around the head centre exactly as the donor does
     // (vr.c:507-509) instead of around one eye — which would swing the whole
@@ -381,6 +410,14 @@ static void sm64_vr_build_matrices(cp_drawable_t drawable, simd_float4x4 frozenH
         NSLog(@"[vrspike] matrices published (scale=%.0f u/m dist=%.2fm(min %.2f) height=%.2fm "
                "stereo=%.2f zn=%.3f zf=%.1f)",
               sVrScale, sVrDist, kVrClipMargin, sVrHeight, sVrStereo, zn, zf);
+        sVrValid = 1;   // so the size query below answers (the matrices are written)
+        int rw = 0, rh = 0;
+        if (sm64_vr_spike_render_size(&rw, &rh)) {
+            NSLog(@"[vrspike] eye render %dx%d for a %dx%d view -> sampling %.2fx/%.2fx "
+                   "(scale %.2f; >1 supersamples, <1 upsamples and shows jaggies)",
+                  rw, rh, sVrViewW, sVrViewH,
+                  (double)rw / (double)sVrViewW, (double)rh / (double)sVrViewH, sVrRenderScale);
+        }
     }
     sVrValid = 1;
 }
@@ -718,11 +755,7 @@ void sm64_vr_spike_run(void *layer_renderer_ptr, int variant) {
 
                 // R0.2: paint this eye's engine render over the whole slice.
                 if (sVrWorld && sVrValid && sVrPipeline) {
-                    // The diagnostic ladder: which finished eye this view shows.
-                    size_t pick = (v < 2) ? v : 0;
-                    if (sVrSwapEyes) { pick = 1 - pick; }
-                    if (sVrForceMono) { pick = 0; }
-                    id<MTLTexture> src = sVrEyeCopy[pick];
+                    id<MTLTexture> src = sVrEyeCopy[(v < 2) ? v : 0];
                     if (src == nil) { src = sVrEyeCopy[0] ? sVrEyeCopy[0] : sVrEyeCopy[1]; }
                     if (src != nil) {
                         // Reverse-Z depth for the whole image at the diorama's

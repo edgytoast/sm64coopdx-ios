@@ -192,6 +192,9 @@ NEW_FILES = [
     "sm64_vision_settings.m",
     "sm64-bridging-header.h",
     "SM64VisionApp.swift",
+    # R0 SPIKE (throwaway — VR-CHARTER §5 R0.1). Remove these two with the spike.
+    "sm64_vr_spike.h",
+    "sm64_vr_spike.m",
 ]
 for name in NEW_FILES:
     src = APP / name
@@ -261,9 +264,39 @@ void sm64_gfx_set_3d_params(float separation, float convergence, float hud_depth
 
 static Mat4 sm64_gfx_eye_P;
 
+// R0 SPIKE (throwaway — VR-CHARTER §5 R0.2 / A3). The VR path replaces the
+// projection outright with the composed camera-space -> eye-clip matrix
+// (EyeVP = A * V * P) the compositor loop publishes, instead of skewing the
+// game's own projection the way the panel's stereo does. Returns NULL whenever
+// VR is not driving, so the panel path below is byte-for-byte unchanged.
+const float *sm64_vr_eye_viewproj(int eye);   // sm64_vr_spike.m
+int          sm64_vr_hide_background(void);   // 1 = drop the ortho skybox
+
 // The projection to compose into MP for the eye currently in flight.
 static float (*gfx_stereo_projection(void))[4] {
     if (sm64_gfx_3d_eye == SM64_EYE_OFF) { return rsp.P_matrix; }
+
+    // R0 SPIKE: VR override. Perspective geometry takes the published EyeVP;
+    // the ORTHO layer has no meaningful place in a surrounding world yet, so the
+    // background (SM64's skybox is a FULLSCREEN ortho image, not a dome) is
+    // pushed outside the frustum and clipped away — otherwise it papers over the
+    // whole view and there is nothing to see the world hang in. The HUD/menu
+    // ortho is left alone so there is a familiar reference in frame.
+    {
+        const float *vrm = sm64_vr_eye_viewproj(sm64_gfx_3d_eye);
+        if (vrm != NULL) {
+            if (rsp.P_matrix[3][3] > 0.5f) {
+                if (sm64_gfx_bg_layer && sm64_vr_hide_background()) {
+                    mtxf_copy(sm64_gfx_eye_P, rsp.P_matrix);
+                    sm64_gfx_eye_P[3][0] += 10.0f; // ortho w == 1 => NDC x ~ +10, fully clipped
+                    return sm64_gfx_eye_P;
+                }
+                return rsp.P_matrix;
+            }
+            memcpy(sm64_gfx_eye_P, vrm, sizeof(sm64_gfx_eye_P));
+            return sm64_gfx_eye_P;
+        }
+    }
 
     // Signed half-separation for this eye.
     const float e = (sm64_gfx_3d_eye == SM64_EYE_RIGHT ? 1.0f : -1.0f) * 0.5f * sm64_gfx_3d_sep;

@@ -26,6 +26,7 @@
 //     explicitly specifies "% of default".
 
 #import "sm64_vision_host.h"
+#import "sm64_vr_spike.h"   // R0 SPIKE (throwaway): the VR world rows
 
 #ifdef SM64_VISION_3D
 
@@ -90,9 +91,21 @@ static NSString *sm64_value_text(NSString *key, float v) {
         return sm64_use_feet() ? [NSString stringWithFormat:@"%.1f ft", full * 3.28084f]
                                : [NSString stringWithFormat:@"%.2f m", full];
     }
-    if ([key isEqualToString:@"dist"] || [key isEqualToString:@"posH"]) {
+    if ([key isEqualToString:@"dist"] || [key isEqualToString:@"posH"] ||
+        [key isEqualToString:@"vrDist"] || [key isEqualToString:@"vrHeight"]) {
         return sm64_use_feet() ? [NSString stringWithFormat:@"%.1f ft", v * 3.28084f]
                                : [NSString stringWithFormat:@"%.2f m", v];
+    }
+    // R0 SPIKE rows. Stereo reads as a % of the true IPD (the donor's lever);
+    // World Scale reads as the metres the world's ~8000-unit span becomes, which
+    // is the number a human can actually picture.
+    if ([key isEqualToString:@"vrStereo"]) {
+        return [NSString stringWithFormat:@"%.0f%% IPD", v * 100.0f];
+    }
+    if ([key isEqualToString:@"vrScale"]) {
+        float span = (v > 1.0f) ? (8000.0f / v) : 0.0f;
+        return sm64_use_feet() ? [NSString stringWithFormat:@"%.0f ft world", span * 3.28084f]
+                               : [NSString stringWithFormat:@"%.1f m world", span];
     }
     return [NSString stringWithFormat:@"%.2f", v];
 }
@@ -113,7 +126,7 @@ static __weak SM64SettingsVC *g_settingsVC = nil;
 - (void)viewDidLoad {
     [super viewDidLoad];
     g_settingsVC = self;
-    _sections = @[ @"Vision Pro 3D" ];
+    _sections = @[ @"Vision Pro 3D", @"VR mode (R0 spike)" ];
     _rows = @[ @[
         mkrow(@"Screen Distance", @"dist", SM64_ROW_SLIDER, 1.0, 8.0, SM64_DEF_DIST),
         // Item 2: ranges WIDENED so the panel can go ultrawide / ultratall (the
@@ -141,6 +154,15 @@ static __weak SM64SettingsVC *g_settingsVC = nil;
         mkrow(@"Aspect Ratio", @"infoAspect", SM64_ROW_INFO, 0, 0, 0),
         mkrow(@"Units", @"units", SM64_ROW_SEG, 0, 1, SM64_DEF_UNITS),
         mkrow(@"Recenter Screen", @"recenter", SM64_ROW_BUTTON, 0, 0, 0),
+    ], @[
+        // R0 SPIKE (throwaway). Stereo Strength FIRST because it is the one that
+        // fixes doubling: the donor calls 1.0 "true IPD" and lower "gentler
+        // stereo / less cross-eye", and ships 0.50 on every preset.
+        mkrow(@"Stereo Strength", @"vrStereo", SM64_ROW_SLIDER, 0.0, 1.0, SM64_DEF_VRSTEREO),
+        mkrow(@"World Scale", @"vrScale", SM64_ROW_SLIDER, 300.0, 6000.0, SM64_DEF_VRSCALE),
+        mkrow(@"World Distance", @"vrDist", SM64_ROW_SLIDER, 0.3, 3.0, SM64_DEF_VRDIST),
+        mkrow(@"World Height", @"vrHeight", SM64_ROW_SLIDER, -1.5, 0.5, SM64_DEF_VRHEIGHT),
+        mkrow(@"Recenter VR World", @"vrRecenter", SM64_ROW_BUTTON, 0, 0, 0),
     ] ];
 }
 
@@ -170,7 +192,8 @@ static __weak SM64SettingsVC *g_settingsVC = nil;
 }
 
 - (void)resetVision3D {
-    for (NSString *k in @[ @"dist", @"halfW", @"halfH", @"posH", @"sep", @"conv", @"convAuto", @"dim" ]) {
+    for (NSString *k in @[ @"dist", @"halfW", @"halfH", @"posH", @"sep", @"conv", @"convAuto", @"dim",
+                           @"vrStereo", @"vrScale", @"vrDist", @"vrHeight" ]) {
         [NSUserDefaults.standardUserDefaults
             removeObjectForKey:[@"sm64vp3d." stringByAppendingString:k]];
     }
@@ -268,6 +291,9 @@ static __weak SM64SettingsVC *g_settingsVC = nil;
     if ([r.key isEqualToString:@"recenter"]) {
         sm64_3d_recenter();
         NSLog(@"[sm64vp] settings: recenter requested");
+    } else if ([r.key isEqualToString:@"vrRecenter"]) {
+        sm64_vr_spike_recenter();
+        NSLog(@"[vrspike] settings: VR world recenter requested");
     }
 }
 

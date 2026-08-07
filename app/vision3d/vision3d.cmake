@@ -74,6 +74,9 @@ function(_sm64_vision3d_wire)
         ${GAME_ROOT}/src/pc/vision3d/sm64_vision_host.m
         ${GAME_ROOT}/src/pc/vision3d/sm64_immersive.m
         ${GAME_ROOT}/src/pc/vision3d/sm64_vision_settings.m
+        # R0 SPIKE (throwaway — VR-CHARTER §5 R0.1). Delete this line and the
+        # file with the spike branch.
+        ${GAME_ROOT}/src/pc/vision3d/sm64_vr_spike.m
     )
     # -fobjc-arc is MANDATORY, and its absence is not a compile error — it is a
     # crash days later. This tree does NOT enable ARC globally; overlay 0005

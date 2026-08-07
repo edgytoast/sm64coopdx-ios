@@ -45,6 +45,17 @@
 #define SM64_DEF_DIM      0.8f
 #define SM64_DEF_UNITS    1.0f    // 0 = metres, 1 = feet
 
+// R0 SPIKE (throwaway) — VR world placement, the donor's Diorama preset
+// (vr.c:1503) including the two comfort levers the first device build lacked.
+// vrStereo is the one that matters most: the donor's own comment calls 1.0
+// "true IPD" and lower "gentler stereo / less cross-eye", and every donor preset
+// ships 0.50. Live-draggable because the donor's numbers are annotated "tuned by
+// feel" and the headset is the only instrument that counts.
+#define SM64_DEF_VRSCALE  1376.0f // game units per metre (bigger = smaller world)
+#define SM64_DEF_VRDIST   0.60f   // metres in front of the frozen head (donor ships 0.25; Austin's device report was "very close up to my face", so the FIRST look starts further out and the slider goes back down to 0.30)
+#define SM64_DEF_VRHEIGHT (-0.35f)// metres relative to eye level
+#define SM64_DEF_VRSTEREO 0.50f   // eye offset as a fraction of the true IPD
+
 // Boots the SDL/coopdx engine under the SwiftUI app entry and owns the 2D<->3D
 // transition sequencing. Hosted in the SwiftUI WindowGroup (see SM64VisionApp.swift).
 @interface SM64HostViewController : UIViewController

@@ -10,3 +10,5 @@
 
 #import "sm64_vision_3d.h"
 #import "sm64_vision_host.h"
+// R0 SPIKE (throwaway): the VR immersion-style probe spaces.
+#import "sm64_vr_spike.h"

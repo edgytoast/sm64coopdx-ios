@@ -123,7 +123,7 @@ WHAT IS NOT TOUCHED
 
 --- /dev/null
 +++ b/src/pc/vision3d/sm64_vision_3d.h
-@@ -0,0 +1,206 @@
+@@ -0,0 +1,208 @@
 +#ifndef SM64_VISION_3D_H
 +#define SM64_VISION_3D_H
 +
@@ -278,6 +278,8 @@ WHAT IS NOT TOUCHED
 +// running) so the caller falls back to overlay 0012's sleep limiter. Called from
 +// pc_main.c's produce_interpolation_frames_and_delay().
 +bool sm64_3d_wait_for_compositor_frame(void);
++// R0 SPIKE (throwaway): lets the VR probe loop drive the same phase-lock.
++void sm64_3d_pace_signal_now(void);
 +// Surroundings dimming, 0..1 on the UI scale. Mapped through a perceptual curve
 +// internally (linear "doesn't get dark until 80%" — guide §2.7).
 +void sm64_3d_set_dim(float dim);
@@ -332,7 +334,7 @@ WHAT IS NOT TOUCHED
 +#endif // SM64_VISION_3D_H
 --- /dev/null
 +++ b/src/pc/vision3d/sm64_vision_host.h
-@@ -0,0 +1,65 @@
+@@ -0,0 +1,76 @@
 +#ifndef SM64_VISION_HOST_H
 +#define SM64_VISION_HOST_H
 +
@@ -380,6 +382,17 @@ WHAT IS NOT TOUCHED
 +#define SM64_DEF_DIM      0.8f
 +#define SM64_DEF_UNITS    1.0f    // 0 = metres, 1 = feet
 +
++// R0 SPIKE (throwaway) — VR world placement, the donor's Diorama preset
++// (vr.c:1503) including the two comfort levers the first device build lacked.
++// vrStereo is the one that matters most: the donor's own comment calls 1.0
++// "true IPD" and lower "gentler stereo / less cross-eye", and every donor preset
++// ships 0.50. Live-draggable because the donor's numbers are annotated "tuned by
++// feel" and the headset is the only instrument that counts.
++#define SM64_DEF_VRSCALE  1376.0f // game units per metre (bigger = smaller world)
++#define SM64_DEF_VRDIST   0.60f   // metres in front of the frozen head (donor ships 0.25; Austin's device report was "very close up to my face", so the FIRST look starts further out and the slider goes back down to 0.30)
++#define SM64_DEF_VRHEIGHT (-0.35f)// metres relative to eye level
++#define SM64_DEF_VRSTEREO 0.50f   // eye offset as a fraction of the true IPD
++
 +// Boots the SDL/coopdx engine under the SwiftUI app entry and owns the 2D<->3D
 +// transition sequencing. Hosted in the SwiftUI WindowGroup (see SM64VisionApp.swift).
 +@interface SM64HostViewController : UIViewController
@@ -400,7 +413,7 @@ WHAT IS NOT TOUCHED
 +#endif // SM64_VISION_HOST_H
 --- /dev/null
 +++ b/src/pc/vision3d/sm64_vision_host.m
-@@ -0,0 +1,564 @@
+@@ -0,0 +1,671 @@
 +// sm64_vision_host.m — boots the SDL/coopdx engine under the SwiftUI app entry
 +// (visionOS only) and owns the 2D<->3D transition sequencing.
 +//
@@ -431,6 +444,7 @@ WHAT IS NOT TOUCHED
 +//     loop calls ON the main thread, so it needs no queue at all.
 +
 +#import "sm64_vision_host.h"
++#import "sm64_vr_spike.h"   // R0 SPIKE (throwaway)
 +
 +#ifdef SM64_VISION_3D
 +
@@ -498,6 +512,11 @@ WHAT IS NOT TOUCHED
 +                           conv,
 +                           sm64_3d_setting_f("hud", SM64_DEF_HUD));
 +    sm64_3d_set_dim(sm64_3d_setting_f("dim", SM64_DEF_DIM));
++    // R0 SPIKE (throwaway): the VR world placement, live while dragging.
++    sm64_vr_spike_set_tunables(sm64_3d_setting_f("vrScale", SM64_DEF_VRSCALE),
++                               sm64_3d_setting_f("vrDist", SM64_DEF_VRDIST),
++                               sm64_3d_setting_f("vrHeight", SM64_DEF_VRHEIGHT),
++                               sm64_3d_setting_f("vrStereo", SM64_DEF_VRSTEREO));
 +}
 +
 +// ---------------------------------------------------------------------------
@@ -683,6 +702,55 @@ WHAT IS NOT TOUCHED
 +        }
 +    }
 +
++    // R0 SPIKE (throwaway): arm the console bridge on the DEVICE. The bridge is
++    // launch-gated on SM64_CONSOLE (impossible from SpringBoard) or the presence
++    // of Documents/console_enabled.txt, so creating that file here means the
++    // NEXT launch is readable over the tailnet — which is the only way to get
++    // the IPD CHECK and CONTRACT dumps off the headset without asking Austin to
++    // go fishing in the Files app. Dies with the spike.
++    if (frames == 120) {
++        NSString *docs = [NSSearchPathForDirectoriesInDomains(
++            NSDocumentDirectory, NSUserDomainMask, YES) firstObject];
++        NSString *marker = [docs stringByAppendingPathComponent:@"console_enabled.txt"];
++        if (docs && ![NSFileManager.defaultManager fileExistsAtPath:marker]) {
++            [@"VR R0 spike: enables the port-8791 console bridge on the next launch.\n"
++                writeToFile:marker atomically:YES encoding:NSUTF8StringEncoding error:NULL];
++            NSLog(@"[vrspike] armed the console bridge for the next launch (%@)", marker);
++        }
++    }
++
++    // R0 SPIKE harness (throwaway). SM64_VR_SPIKE=<variant> opens one of the
++    // three probe spaces <SM64_VR_SPIKE_AT or 8> seconds after boot, and
++    // SM64_VR_SPIKE_FOR=<seconds> exits again. Same channel and the same reason
++    // as AUTOENTER above: the ornament needs a gaze-pinch that idb cannot drive,
++    // and verification that cannot be driven is verification that does not
++    // happen. Absent => no effect whatsoever.
++    {
++        static bool spike_entered = false, spike_exited = false;
++        static double spike_at = -1.0;
++        const char *sp = getenv("SM64_VR_SPIKE");
++        if (sp && *sp) {
++            double now = (double)frames / 120.0; // coarse; only a delay is needed
++            if (spike_at < 0.0) {
++                const char *at = getenv("SM64_VR_SPIKE_AT");
++                spike_at = (at && *at) ? atof(at) : 8.0;
++                if (spike_at <= 0.0) { spike_at = 8.0; }
++            }
++            if (!spike_entered && now >= spike_at) {
++                spike_entered = true;
++                NSLog(@"[vrspike] harness: entering variant %d", atoi(sp));
++                sm64_vr_spike_enter(atoi(sp));
++            }
++            const char *forS = getenv("SM64_VR_SPIKE_FOR");
++            if (spike_entered && !spike_exited && forS && *forS &&
++                now >= spike_at + atof(forS)) {
++                spike_exited = true;
++                NSLog(@"[vrspike] harness: exiting");
++                sm64_vr_spike_enter(0);
++            }
++        }
++    }
++
 +    // Harness: auto-EXIT N seconds after entering, so the parked-window RESTORE
 +    // path is verifiable headlessly (the Exit ornament needs a gaze-pinch, which
 +    // idb ui cannot drive on this simulator). Env-gated; absent => no effect.
@@ -808,6 +876,58 @@ WHAT IS NOT TOUCHED
 +        NSLog(@"[sm64vp] Enter3D(0): render thread stopped=%d", !sm64_3d_imm_running);
 +        sm64_3d_on = 0;
 +        SM64_SetImmersiveMode(false); // sm64_3d_exit_finalize runs after the dismiss
++    }
++}
++
++// ---------------------------------------------------------------------------
++// R0 SPIKE (throwaway — VR-CHARTER §5 R0.1). Enter/exit one of the three VR
++// probe spaces. Deliberately reuses sm64_3d_enter's sequencing VERBATIM in
++// shape: capture the pre-3D scene size, push settings, engine offscreen FIRST,
++// curtain, then ask SwiftUI to open. The offscreen-first order is not optional
++// here — .full certainly hides the 2D window, and a hidden window's
++// nextDrawable never returns (a hang, not a glitch).
++//
++// It shares sm64_3d_on with the 3D path on purpose: sm64_3d_park_window and
++// sm64_3d_exit_finalize both gate on it, and the spike wants exactly the same
++// park/restore behaviour rather than a second copy of it.
++// ---------------------------------------------------------------------------
++extern void SM64_SetVRSpikeMode(int variant); // SM64VisionApp.swift (@_cdecl)
++
++void sm64_vr_spike_enter(int variant) {
++    if (!sm64_booted) {
++        NSLog(@"[vrspike] enter(%d) ignored pre-boot", variant);
++        return;
++    }
++    if (variant == sm64_vr_spike_variant) { return; }
++
++    if (variant != 0) {
++        if (sm64_3d_on) {
++            NSLog(@"[vrspike] enter(%d) refused — the 3D space is open", variant);
++            return;
++        }
++        {
++            UIView *view = (__bridge UIView *)sm64_metal_get_sdl_uiview();
++            UIWindowScene *scene = view.window.windowScene;
++            if (scene) {
++                CGSize sz = scene.coordinateSpace.bounds.size;
++                if (sz.width > 600.0 && sm64_pre3d_scene_size.width == 0.0) {
++                    sm64_pre3d_scene_size = sz;
++                }
++            }
++        }
++        sm64_vr_spike_variant = variant;
++        sm64_3d_on = 1;
++        sm64_metal_set_3d_mode(1);
++        SM64_SetCurtain(true);
++        SM64_SetVRSpikeMode(variant);
++        NSLog(@"[vrspike] entry committed (variant=%d)", variant);
++    } else {
++        sm64_vr_spike_stop = 1;
++        for (int i = 0; i < 200 && sm64_vr_spike_running; i++) { usleep(10 * 1000); } // <= 2 s
++        NSLog(@"[vrspike] exit: render thread stopped=%d", !sm64_vr_spike_running);
++        sm64_vr_spike_variant = 0;
++        sm64_3d_on = 0;
++        SM64_SetVRSpikeMode(0);
 +    }
 +}
 +
@@ -967,7 +1087,7 @@ WHAT IS NOT TOUCHED
 +#endif // SM64_VISION_3D
 --- /dev/null
 +++ b/src/pc/vision3d/sm64_immersive.m
-@@ -0,0 +1,952 @@
+@@ -0,0 +1,958 @@
 +// sm64_immersive.m — visionOS stereoscopic "3D screen in the room".
 +//
 +// visionOS cannot show real-time stereo in a normal 2D window: stereo goes
@@ -1545,6 +1665,12 @@ WHAT IS NOT TOUCHED
 +    pthread_mutex_unlock(&sm64_pace_mtx);
 +}
 +
++// R0 SPIKE (throwaway): the VR probe loop is a SECOND compositor loop, and the
++// engine's wait below does not care which loop releases it — only that something
++// does, once per compositor frame. Without this the VR loop leaves the engine on
++// the 50 ms timeout path (~20 Hz into a 90 Hz compositor).
++void sm64_3d_pace_signal_now(void) { sm64_pace_signal(); }
++
 +bool sm64_3d_wait_for_compositor_frame(void) {
 +    struct timespec ts;
 +    clock_gettime(CLOCK_REALTIME, &ts);
@@ -1922,7 +2048,7 @@ WHAT IS NOT TOUCHED
 +#endif // SM64_VISION_3D
 --- /dev/null
 +++ b/src/pc/vision3d/sm64_vision_settings.m
-@@ -0,0 +1,315 @@
+@@ -0,0 +1,341 @@
 +// sm64_vision_settings.m — the "Vision Pro 3D" settings table.
 +//
 +// Ported from vkQuake-ios ios/shell/ios_settings.m's "Vision Pro 3D" section,
@@ -1951,6 +2077,7 @@ WHAT IS NOT TOUCHED
 +//     explicitly specifies "% of default".
 +
 +#import "sm64_vision_host.h"
++#import "sm64_vr_spike.h"   // R0 SPIKE (throwaway): the VR world rows
 +
 +#ifdef SM64_VISION_3D
 +
@@ -2015,9 +2142,21 @@ WHAT IS NOT TOUCHED
 +        return sm64_use_feet() ? [NSString stringWithFormat:@"%.1f ft", full * 3.28084f]
 +                               : [NSString stringWithFormat:@"%.2f m", full];
 +    }
-+    if ([key isEqualToString:@"dist"] || [key isEqualToString:@"posH"]) {
++    if ([key isEqualToString:@"dist"] || [key isEqualToString:@"posH"] ||
++        [key isEqualToString:@"vrDist"] || [key isEqualToString:@"vrHeight"]) {
 +        return sm64_use_feet() ? [NSString stringWithFormat:@"%.1f ft", v * 3.28084f]
 +                               : [NSString stringWithFormat:@"%.2f m", v];
++    }
++    // R0 SPIKE rows. Stereo reads as a % of the true IPD (the donor's lever);
++    // World Scale reads as the metres the world's ~8000-unit span becomes, which
++    // is the number a human can actually picture.
++    if ([key isEqualToString:@"vrStereo"]) {
++        return [NSString stringWithFormat:@"%.0f%% IPD", v * 100.0f];
++    }
++    if ([key isEqualToString:@"vrScale"]) {
++        float span = (v > 1.0f) ? (8000.0f / v) : 0.0f;
++        return sm64_use_feet() ? [NSString stringWithFormat:@"%.0f ft world", span * 3.28084f]
++                               : [NSString stringWithFormat:@"%.1f m world", span];
 +    }
 +    return [NSString stringWithFormat:@"%.2f", v];
 +}
@@ -2038,7 +2177,7 @@ WHAT IS NOT TOUCHED
 +- (void)viewDidLoad {
 +    [super viewDidLoad];
 +    g_settingsVC = self;
-+    _sections = @[ @"Vision Pro 3D" ];
++    _sections = @[ @"Vision Pro 3D", @"VR mode (R0 spike)" ];
 +    _rows = @[ @[
 +        mkrow(@"Screen Distance", @"dist", SM64_ROW_SLIDER, 1.0, 8.0, SM64_DEF_DIST),
 +        // Item 2: ranges WIDENED so the panel can go ultrawide / ultratall (the
@@ -2066,6 +2205,15 @@ WHAT IS NOT TOUCHED
 +        mkrow(@"Aspect Ratio", @"infoAspect", SM64_ROW_INFO, 0, 0, 0),
 +        mkrow(@"Units", @"units", SM64_ROW_SEG, 0, 1, SM64_DEF_UNITS),
 +        mkrow(@"Recenter Screen", @"recenter", SM64_ROW_BUTTON, 0, 0, 0),
++    ], @[
++        // R0 SPIKE (throwaway). Stereo Strength FIRST because it is the one that
++        // fixes doubling: the donor calls 1.0 "true IPD" and lower "gentler
++        // stereo / less cross-eye", and ships 0.50 on every preset.
++        mkrow(@"Stereo Strength", @"vrStereo", SM64_ROW_SLIDER, 0.0, 1.0, SM64_DEF_VRSTEREO),
++        mkrow(@"World Scale", @"vrScale", SM64_ROW_SLIDER, 300.0, 6000.0, SM64_DEF_VRSCALE),
++        mkrow(@"World Distance", @"vrDist", SM64_ROW_SLIDER, 0.3, 3.0, SM64_DEF_VRDIST),
++        mkrow(@"World Height", @"vrHeight", SM64_ROW_SLIDER, -1.5, 0.5, SM64_DEF_VRHEIGHT),
++        mkrow(@"Recenter VR World", @"vrRecenter", SM64_ROW_BUTTON, 0, 0, 0),
 +    ] ];
 +}
 +
@@ -2095,7 +2243,8 @@ WHAT IS NOT TOUCHED
 +}
 +
 +- (void)resetVision3D {
-+    for (NSString *k in @[ @"dist", @"halfW", @"halfH", @"posH", @"sep", @"conv", @"convAuto", @"dim" ]) {
++    for (NSString *k in @[ @"dist", @"halfW", @"halfH", @"posH", @"sep", @"conv", @"convAuto", @"dim",
++                           @"vrStereo", @"vrScale", @"vrDist", @"vrHeight" ]) {
 +        [NSUserDefaults.standardUserDefaults
 +            removeObjectForKey:[@"sm64vp3d." stringByAppendingString:k]];
 +    }
@@ -2193,6 +2342,9 @@ WHAT IS NOT TOUCHED
 +    if ([r.key isEqualToString:@"recenter"]) {
 +        sm64_3d_recenter();
 +        NSLog(@"[sm64vp] settings: recenter requested");
++    } else if ([r.key isEqualToString:@"vrRecenter"]) {
++        sm64_vr_spike_recenter();
++        NSLog(@"[vrspike] settings: VR world recenter requested");
 +    }
 +}
 +
@@ -2240,7 +2392,7 @@ WHAT IS NOT TOUCHED
 +#endif // SM64_VISION_3D
 --- /dev/null
 +++ b/src/pc/vision3d/sm64-bridging-header.h
-@@ -0,0 +1,12 @@
+@@ -0,0 +1,14 @@
 +// Swift <-> ObjC bridging header for the visionOS target.
 +//
 +// Exposes the C/ObjC 3D shell to SM64VisionApp.swift: the host view controller,
@@ -2253,9 +2405,11 @@ WHAT IS NOT TOUCHED
 +
 +#import "sm64_vision_3d.h"
 +#import "sm64_vision_host.h"
++// R0 SPIKE (throwaway): the VR immersion-style probe spaces.
++#import "sm64_vr_spike.h"
 --- /dev/null
 +++ b/src/pc/vision3d/SM64VisionApp.swift
-@@ -0,0 +1,249 @@
+@@ -0,0 +1,360 @@
 +// SM64VisionApp.swift — SwiftUI app entry for the visionOS target.
 +//
 +// visionOS requires a SwiftUI `App` to declare an `ImmersiveSpace` (UIKit cannot
@@ -2278,6 +2432,24 @@ WHAT IS NOT TOUCHED
 +    static let shared = SM64AppModel()
 +    @Published var immersive = false
 +    @Published var showSettings = false
++    // R0 SPIKE (throwaway): which VR spike space is open — 0 none, 1 mixed-only,
++    // 2 mixed+full switchable, 3 full-only. See sm64_vr_spike.h.
++    @Published var vrSpike: Int = 0
++    // R0 SPIKE: the live style for variant 2's switchable space.
++    @Published var vrSpikeFull: Bool = false
++}
++
++// R0 SPIKE ids, indexed by variant so the C side only ever passes an int.
++private let sm64VRSpikeIDs = ["", "SM64-VR-MIXED", "SM64-VR-SWITCH", "SM64-VR-FULL"]
++
++@_cdecl("SM64_SetVRSpikeMode")
++func SM64_SetVRSpikeMode(_ variant: Int32) {
++    DispatchQueue.main.async { SM64AppModel.shared.vrSpike = Int(variant) }
++}
++
++@_cdecl("SM64_SetVRSpikeStyleFull")
++func SM64_SetVRSpikeStyleFull(_ full: Bool) {
++    DispatchQueue.main.async { SM64AppModel.shared.vrSpikeFull = full }
 +}
 +
 +// Called from sm64_vision_host.m to flip the SwiftUI state that actually
@@ -2404,8 +2576,25 @@ WHAT IS NOT TOUCHED
 +            // and overlaps game content. .padding(.top) adds the clear gap.
 +            .ornament(attachmentAnchor: .scene(.bottom), contentAlignment: .top) {
 +                HStack(spacing: 16) {
-+                    Button(model.immersive ? "Exit" : "3D") {
-+                        sm64_3d_enter(!model.immersive)
++                    if model.vrSpike == 0 {
++                        Button(model.immersive ? "Exit" : "3D") {
++                            sm64_3d_enter(!model.immersive)
++                        }
++                    }
++                    // R0 SPIKE (throwaway): the device has no env channel, so the
++                    // spike needs a control surface. "VR" opens the switchable
++                    // (.mixed + .full) space with the frozen-pose world; while it
++                    // is open the second button flips the style LIVE, which is the
++                    // A7 question a headset has to answer by eye.
++                    if !model.immersive {
++                        Button(model.vrSpike == 0 ? "VR" : "Exit VR") {
++                            sm64_vr_spike_enter(model.vrSpike == 0 ? 2 : 0)
++                        }
++                    }
++                    if model.vrSpike != 0 {
++                        Button(model.vrSpikeFull ? "Passthrough" : "Full VR") {
++                            SM64_SetVRSpikeStyleFull(!model.vrSpikeFull)
++                        }
 +                    }
 +                    Button { model.showSettings = true } label: {
 +                        Image(systemName: "gearshape.fill")
@@ -2448,6 +2637,32 @@ WHAT IS NOT TOUCHED
 +                }
 +                .frame(minWidth: 900)
 +            }
++            // R0 SPIKE (throwaway): open/dismiss whichever spike space the C side
++            // asked for. Deliberately a SEPARATE onChange from the 3D one — the
++            // whole point is that the two spaces' configurations stay independent
++            // (the recorded trap is a style set changing the OTHER space's
++            // drawable contract).
++            .onChange(of: model.vrSpike) { old, v in
++                NSLog("[vrspike] Swift: vrSpike onChange \(old) -> \(v)")
++                Task {
++                    if old != 0 {
++                        await dismissImmersiveSpace()
++                        NSLog("[vrspike] Swift: dismissed spike space")
++                    }
++                    if v > 0 && v < sm64VRSpikeIDs.count {
++                        let id = sm64VRSpikeIDs[v]
++                        let r = await openImmersiveSpace(id: id)
++                        NSLog("[vrspike] Swift: openImmersiveSpace(\(id)) -> \(String(describing: r))")
++                        if case .error = r {
++                            sm64_vr_spike_enter(0) // roll the engine back out of offscreen mode
++                        } else {
++                            sm64_3d_park_window()
++                        }
++                    } else {
++                        sm64_3d_exit_finalize()
++                    }
++                }
++            }
 +            .onChange(of: model.immersive) { _, on in
 +                NSLog("[sm64vp] Swift: immersive onChange -> \(on)")
 +                Task {
@@ -2479,8 +2694,22 @@ WHAT IS NOT TOUCHED
 +    }
 +}
 +
++// R0 SPIKE: spawn the spike loop on its own thread, same rule as the 3D loop.
++private func sm64SpawnVRSpike(_ layerRenderer: LayerRenderer, _ variant: Int32) {
++    NSLog("[vrspike] Swift: CompositorLayer ready (variant=\(variant)) — spawning render thread")
++    let t = Thread {
++        sm64_vr_spike_run(Unmanaged.passUnretained(layerRenderer).toOpaque(), variant)
++    }
++    t.name = "SM64-VR-Spike"
++    t.stackSize = 2 << 20
++    t.start()
++}
++
 +@main
 +struct SM64VisionApp: App {
++    // R0 SPIKE: the App observes the model so variant 2's style binding is live.
++    @StateObject private var model = SM64AppModel.shared
++
 +    var body: some Scene {
 +        WindowGroup {
 +            SM64RootView()
@@ -2503,11 +2732,740 @@ WHAT IS NOT TOUCHED
 +        // __BUG_IN_CLIENT__. Crown-dimming would need real portal support; the
 +        // "Surroundings Dimming" slider is our in-app replacement.
 +        .immersionStyle(selection: .constant(.mixed), in: .mixed)
++
++        // -------------------------------------------------------------------
++        // R0 SPIKE (throwaway — VR-CHARTER §5 R0.1 / A7). Three separate spaces,
++        // one per style SET, because a set is fixed at scene-declaration time.
++        // Opening them one at a time answers "which survive encode_present" and
++        // "does the drawable contract differ between styles"; variant 2 also
++        // answers "does a LIVE switch survive".
++        //
++        // The existing SM64-3D space above is NOT touched — that independence is
++        // exactly what A7 path (a) needs to be true.
++        // -------------------------------------------------------------------
++        ImmersiveSpace(id: "SM64-VR-MIXED") {
++            CompositorLayer(configuration: SM64CompositorConfiguration()) { lr in
++                sm64SpawnVRSpike(lr, 1)
++            }
++        }
++        .immersionStyle(selection: .constant(.mixed), in: .mixed)
++
++        ImmersiveSpace(id: "SM64-VR-SWITCH") {
++            CompositorLayer(configuration: SM64CompositorConfiguration()) { lr in
++                sm64SpawnVRSpike(lr, 2)
++            }
++        }
++        // The shape of the recorded trap: a style SET with more than one member,
++        // switched live. A computed Binding rather than @State so the loop can
++        // drive it from C through the published flag.
++        .immersionStyle(selection: Binding<ImmersionStyle>(
++            get: { model.vrSpikeFull ? .full : .mixed },
++            set: { _ in }), in: .mixed, .full)
++
++        ImmersiveSpace(id: "SM64-VR-FULL") {
++            CompositorLayer(configuration: SM64CompositorConfiguration()) { lr in
++                sm64SpawnVRSpike(lr, 3)
++            }
++        }
++        .immersionStyle(selection: .constant(.full), in: .full)
 +    }
 +}
+--- /dev/null
++++ b/src/pc/vision3d/sm64_vr_spike.h
+@@ -0,0 +1,74 @@
++#ifndef SM64_VR_SPIKE_H
++#define SM64_VR_SPIKE_H
++
++// R0 SPIKE — THROWAWAY. Not part of the shipping VR mode.
++//
++// VR-CHARTER §5 R0.1: prove the immersion-style contract for a SECOND immersive
++// space before anything is built on it. The recorded trap (SM64VisionApp.swift
++// :243-247) is that merely ALLOWING .progressive in the EXISTING space's style
++// set changed the drawable contract and aborted cp_drawable_encode_present
++// (__BUG_IN_CLIENT__). A7's preferred path — one "SM64-VR" space with
++// .immersionStyle(selection:, in: .mixed, .full) switching live — is the same
++// SHAPE as that trap, so it must be measured, not assumed.
++//
++// Three spaces are declared instead of one switchable one, deliberately: the
++// question is what each style SET does to the contract, and a set is fixed at
++// scene-declaration time. Opening them one at a time answers all three, and the
++// middle one additionally answers "does a LIVE switch survive".
++//
++//   variant 1  "SM64-VR-MIXED"   .immersionStyle(.constant(.mixed), in: .mixed)
++//   variant 2  "SM64-VR-SWITCH"  .immersionStyle($style,  in: .mixed, .full)
++//                                 + a live .mixed -> .full -> .mixed switch
++//   variant 3  "SM64-VR-FULL"    .immersionStyle(.constant(.full),  in: .full)
++//
++// The loop itself is the minimum that can present: clear each view to a colour
++// with PARTIAL alpha (so passthrough showing through is visible in .mixed and
++// its absence is visible in .full), write depth, present. Every contract fact
++// the drawable exposes is logged on the first frame and on every CHANGE, which
++// is what makes "did the style switch change the contract" a readable answer
++// rather than an inference.
++
++#include "sm64_vision_3d.h"
++
++#ifdef SM64_VISION_3D
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++// The spike render loop, run on its own thread from the CompositorLayer closure
++// (same rule as the 3D loop: never the main thread). variant is 1/2/3 above.
++void sm64_vr_spike_run(void *layer_renderer, int variant);
++
++// Loop handshake, same contract as sm64_3d_imm_stop/running.
++extern volatile int sm64_vr_spike_stop;
++extern volatile int sm64_vr_spike_running;
++
++// Enter/exit. variant 0 = exit. Implemented in sm64_vision_host.m, which owns
++// the transition sequencing: the engine goes offscreen BEFORE the space opens,
++// because in .full the 2D window is certainly hidden and a hidden window's
++// nextDrawable never returns.
++void sm64_vr_spike_enter(int variant);
++
++// Which variant is live (0 = none). Written by sm64_vr_spike_enter.
++extern volatile int sm64_vr_spike_variant;
++
++// Live style switch for variant 2, driven from the loop's own frame clock.
++// Implemented in Swift (@_cdecl); declared here so the loop can call it.
++void SM64_SetVRSpikeStyleFull(bool full);
++
++// Live tunables, pushed by sm64_3d_apply_settings from the settings sheet while
++// the sliders are dragged. scale = game units per metre, dist/height in metres,
++// stereo = eye offset as a fraction of the true IPD (the donor's cross-eye
++// lever, 0.50 shipped). Out-of-range values are ignored per-field.
++void sm64_vr_spike_set_tunables(float scale, float dist, float height, float stereo);
++
++// Re-freeze the head pose on the next tracked frame ("Recenter VR World").
++void sm64_vr_spike_recenter(void);
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif // SM64_VISION_3D
++#endif // SM64_VR_SPIKE_H
+--- /dev/null
++++ b/src/pc/vision3d/sm64_vr_spike.m
+@@ -0,0 +1,613 @@
++// sm64_vr_spike.m — R0 SPIKE, THROWAWAY. See sm64_vr_spike.h for the question
++// this exists to answer (VR-CHARTER §5 R0.1 / A7).
++//
++// The minimum loop that can present, plus a contract dump. Everything about the
++// loop SHAPE is copied deliberately from sm64_immersive.m rather than rewritten:
++// pacing (cp_frame_predict_timing + cp_time_wait_until), a per-frame ARKit
++// device anchor, a queue from the DRAWABLE's device, and cleared+stored depth
++// are each individually load-bearing — a frame missing any of them is silently
++// never displayed, which would read as "the style aborted" when it did not.
++
++#import "sm64_vr_spike.h"
++
++#ifdef SM64_VISION_3D
++
++#import <CompositorServices/CompositorServices.h>
++#import <Metal/Metal.h>
++#import <ARKit/ARKit.h>
++#import <simd/simd.h>
++#import <Foundation/Foundation.h>
++
++volatile int sm64_vr_spike_stop = 0;
++volatile int sm64_vr_spike_running = 0;
++volatile int sm64_vr_spike_variant = 0;
++
++// ---------------------------------------------------------------------------
++// R0.2 — the frozen-pose world (VR-CHARTER §5 R0.2 / A3).
++//
++// The compositor loop composes EyeVP = P * V * A once, from a device anchor
++// captured ONCE, and publishes it; gfx_stereo_projection returns it instead of
++// the game's projection for every perspective draw. Frozen on purpose: a live
++// per-frame pose is R1, and separating the two means a wrong-looking world here
++// is a MATRIX bug and never a pose-plumbing bug.
++//
++// THE CONVENTION BRIDGE, which is the whole risk in this file:
++//   - simd is COLUMN-vector, column-major:  clip = M * p
++//   - fast3d is ROW-vector:                 clip = v * M,  M[row][col]
++//   A simd_float4x4 reinterpreted as a C float[4][4] indexed [i][j] yields
++//   columns[i][j] — which IS the transpose. So memcpy of the composed simd
++//   matrix into the fast3d array is the entire conversion, and the factors
++//   multiply in the mirrored order (simd P*V*A  <=>  fast3d A*V*P), exactly the
++//   donor's A * V * P.
++// ---------------------------------------------------------------------------
++
++// Donor "Diorama" preset (vr.c:1503) — now including the two comfort levers the
++// first device build shipped WITHOUT, which is why it doubled (Austin,
++// 2026-08-07: "VERY close up to my face and doubled, almost like I'm looking
++// crosseyed"):
++//
++//   STEREO SCALE. The donor scales each eye's offset from the head centre and
++//   its own comment names this exact failure: "1.0 = true IPD, lower = gentler
++//   stereo / LESS CROSS-EYE" (vr.c:367). Every donor preset ships 0.50. The
++//   first spike build rendered at 1.0 — a full physical IPD on a world 25 cm
++//   away is disparity no one can fuse. This is NOT a sign flip by feel (charter
++//   §10); it is a documented lever ported from a build that demonstrably fuses.
++//
++//   STANDOFF. The donor keeps the anchor at least sClipMargin = 0.30 m from the
++//   head (vr.c:288/519, the anti-clip's resting behaviour). At 0.25 m the world
++//   is inside that margin before you even lean in.
++//
++// Live-tunable from the settings sheet, because the donor's own numbers are
++// annotated "tuned by feel" and the headset is the only instrument that counts.
++static float sVrScale  = 1376.0f; // game units per metre (bigger = smaller world)
++static float sVrDist   = 0.60f;   // metres in front of the frozen head (donor 0.25, pushed out after the device report)
++static float sVrHeight = -0.35f;  // metres relative to eye level
++static float sVrStereo = 0.50f;   // eye offset as a fraction of the true IPD
++static const float kVrClipMargin = 0.30f; // donor sClipMargin: minimum anchor standoff
++
++void sm64_vr_spike_set_tunables(float scale, float dist, float height, float stereo) {
++    if (scale  >= 100.0f && scale <= 20000.0f) { sVrScale  = scale;  }
++    if (dist   >= -1.0f  && dist  <= 5.0f)     { sVrDist   = dist;   }
++    if (height >= -3.0f  && height <= 3.0f)    { sVrHeight = height; }
++    if (stereo >= 0.0f   && stereo <= 1.5f)    { sVrStereo = stereo; }
++}
++
++// Re-freeze the head pose on the next tracked frame. If "too close to my face"
++// turns out to be a BAD CAPTURE (a pose read before tracking settled — the trap
++// that once put the 3D panel on the floor) rather than a placement number, this
++// button is what tells the two apart.
++static volatile int sVrRefreeze = 0;
++void sm64_vr_spike_recenter(void) { sVrRefreeze = 1; }
++
++static float sVrEyeVP[2][4][4];
++static volatile int sVrValid = 0;      // read by the ENGINE thread
++static int sVrWorld = 0;               // world mode on (vs the clear-only probe)
++
++// Called from gfx_stereo_projection on the engine thread, once per matrix
++// composition — kept to a flag test and a pointer.
++const float *sm64_vr_eye_viewproj(int eye) {
++    if (!sVrValid || eye < 1 || eye > 2) { return NULL; }
++    return &sVrEyeVP[eye - 1][0][0];
++}
++
++int sm64_vr_hide_background(void) { return sVrWorld; }
++
++// Forward-Z projection from the drawable's own per-eye tangents.
++//
++// NOT cp_drawable_compute_projection used directly, and this is an R0 FINDING
++// rather than a preference: the compositor only supports REVERSE-Z for the
++// drawable's depth (drawable.h: "It only supports reverse-Z depth ... 1 for
++// near 0 for far"), while the engine renders forward-Z (clear 1.0, less-equal)
++// on every other target it owns. Handing the engine a reverse-Z projection
++// inverts its depth test and sorts the world back-to-front. So the ASYMMETRIC
++// FRUSTUM is taken from the compositor's matrix — recovered exactly, no
++// hand-rolled FOV — and only the depth mapping is rebuilt forward.
++//
++//   m00 = 2/(tR-tL), m20 = (tR+tL)/(tR-tL)  =>  tR = (m20+1)/m00, tL = (m20-1)/m00
++static simd_float4x4 sm64_vr_forward_z_projection(simd_float4x4 cpProj, float zn, float zf) {
++    float m00 = cpProj.columns[0].x, m11 = cpProj.columns[1].y;
++    float m20 = cpProj.columns[2].x, m21 = cpProj.columns[2].y;
++    if (fabsf(m00) < 1e-6f) { m00 = 1.0f; }
++    if (fabsf(m11) < 1e-6f) { m11 = 1.0f; }
++    float tR = (m20 + 1.0f) / m00, tL = (m20 - 1.0f) / m00;
++    float tU = (m21 + 1.0f) / m11, tD = (m21 - 1.0f) / m11;
++
++    simd_float4x4 P = (simd_float4x4){{ {0,0,0,0}, {0,0,0,0}, {0,0,0,0}, {0,0,0,0} }};
++    P.columns[0].x = 2.0f / (tR - tL);
++    P.columns[1].y = 2.0f / (tU - tD);
++    P.columns[2].x = (tR + tL) / (tR - tL);
++    P.columns[2].y = (tU + tD) / (tU - tD);
++    P.columns[2].z = zf / (zn - zf);   // -zn -> 0, -zf -> 1 (Metal's 0..1 clip z)
++    P.columns[2].w = -1.0f;
++    P.columns[3].z = zn * zf / (zn - zf);
++    return P;
++}
++
++// Place the game's camera space in the room: camera origin sVrDist ahead of the
++// frozen head at kVrHeight, facing the way the head faced (levelled — no pitch
++// or roll leaks into the world, the same rule the 3D panel already follows).
++static simd_float4x4 sm64_vr_placement(simd_float4x4 frozenHead) {
++    simd_float3 headPos = frozenHead.columns[3].xyz;
++    simd_float3 fwd = -frozenHead.columns[2].xyz;
++    fwd.y = 0.0f;
++    float len = simd_length(fwd);
++    fwd = (len < 1e-4f) ? simd_make_float3(0, 0, -1) : fwd / len;
++
++    // Donor standoff (vr.c:519): never let the anchor sit closer than the clip
++    // margin. Frozen-pose, so this is the resting case of the donor's anti-clip
++    // — the lean-in tracking is R2 work.
++    float dist = (sVrDist < kVrClipMargin) ? kVrClipMargin : sVrDist;
++    simd_float3 pos = headPos + fwd * dist;
++    pos.y += sVrHeight;
++
++    simd_float3 zAxis = -fwd;                                   // camera looks down -Z
++    simd_float3 yAxis = simd_make_float3(0, 1, 0);
++    simd_float3 xAxis = simd_normalize(simd_cross(yAxis, zAxis));
++    yAxis = simd_cross(zAxis, xAxis);
++
++    simd_float4x4 m;
++    m.columns[0] = simd_make_float4(xAxis, 0.0f);
++    m.columns[1] = simd_make_float4(yAxis, 0.0f);
++    m.columns[2] = simd_make_float4(zAxis, 0.0f);
++    m.columns[3] = simd_make_float4(pos, 1.0f);
++    return m;
++}
++
++// Rebuilt EVERY frame (two 4x4 multiplies per eye — nothing) so the settings
++// sliders move the world while you drag them. The POSE is still frozen: this is
++// R0, and keeping the pose out of the loop means a world that looks wrong is a
++// matrix or a number, never pose plumbing.
++static void sm64_vr_build_matrices(cp_drawable_t drawable, simd_float4x4 frozenHead, bool logIt) {
++    const float invS = 1.0f / sVrScale;
++    simd_float4x4 scale = matrix_identity_float4x4;
++    scale.columns[0].x = invS; scale.columns[1].y = invS; scale.columns[2].z = invS;
++    simd_float4x4 A = simd_mul(sm64_vr_placement(frozenHead), scale);
++
++    // Clip planes in METRES (A has already taken game units out). Near 0.05 is
++    // the donor's decal z-fight lesson; far tracks the world's scaled size.
++    const float zn = 0.05f;
++    const float zf = 8000.0f * invS * 3.0f + 5.0f;
++
++    size_t views = cp_drawable_get_view_count(drawable);
++
++    // Cyclopean centre of the eyes in DEVICE space, so the stereo scale shrinks
++    // the offsets around the head centre exactly as the donor does
++    // (vr.c:507-509) instead of around one eye — which would swing the whole
++    // world sideways as the slider moves.
++    simd_float3 centre = simd_make_float3(0, 0, 0);
++    if (views >= 2) {
++        simd_float3 e0 = cp_view_get_transform(cp_drawable_get_view(drawable, 0)).columns[3].xyz;
++        simd_float3 e1 = cp_view_get_transform(cp_drawable_get_view(drawable, 1)).columns[3].xyz;
++        centre = (e0 + e1) * 0.5f;
++    }
++
++    for (size_t v = 0; v < 2; v++) {
++        size_t src = (v < views) ? v : 0;   // the SIMULATOR is mono: both eyes take view 0
++        cp_view_t view = cp_drawable_get_view(drawable, src);
++        simd_float4x4 deviceFromEye = cp_view_get_transform(view);
++        // THE COMFORT LEVER (donor vr.c:507-509). Rotation untouched — only the
++        // eye's offset from the head centre is scaled, so the frustum stays the
++        // runtime's own and only the parallax softens.
++        simd_float3 eyePos = deviceFromEye.columns[3].xyz;
++        simd_float3 scaled = centre + (eyePos - centre) * sVrStereo;
++        deviceFromEye.columns[3] = simd_make_float4(scaled, 1.0f);
++
++        simd_float4x4 eyeFromOrigin = simd_inverse(simd_mul(frozenHead, deviceFromEye));
++        simd_float4x4 cpProj = matrix_identity_float4x4;
++        if (__builtin_available(visionOS 2.0, *)) {
++            cpProj = cp_drawable_compute_projection(
++                drawable, cp_axis_direction_convention_right_up_back, src);
++        }
++        simd_float4x4 P = sm64_vr_forward_z_projection(cpProj, zn, zf);
++        simd_float4x4 M = simd_mul(P, simd_mul(eyeFromOrigin, A));
++        memcpy(&sVrEyeVP[v][0][0], &M, sizeof(sVrEyeVP[v])); // simd column-major == fast3d transpose
++        if (logIt) {
++            NSLog(@"[vrspike] EyeVP[%zu] view %zu: eye(%.4f,%.4f,%.4f) -> scaled(%.4f,%.4f,%.4f)",
++                  v, src, (double)eyePos.x, (double)eyePos.y, (double)eyePos.z,
++                  (double)scaled.x, (double)scaled.y, (double)scaled.z);
++        }
++    }
++    if (logIt) {
++        NSLog(@"[vrspike] matrices published (scale=%.0f u/m dist=%.2fm(min %.2f) height=%.2fm "
++               "stereo=%.2f zn=%.3f zf=%.1f)",
++              sVrScale, sVrDist, kVrClipMargin, sVrHeight, sVrStereo, zn, zf);
++    }
++    sVrValid = 1;
++}
++
++// --- the fullscreen eye copy -------------------------------------------------
++//
++// "Full-slice blit" as a DRAW rather than a blit encoder: the engine texture and
++// the drawable disagree on pixel format (and, on device, on size), which a blit
++// encoder cannot bridge — and a draw can also write the drawable's depth in the
++// same pass, which the compositor requires.
++static NSString *const kSM64VRShader =
++    @"#include <metal_stdlib>\n"
++     "using namespace metal;\n"
++     "struct VOut { float4 pos [[position]]; float2 uv; };\n"
++     "vertex VOut vr_vs(uint vid [[vertex_id]], constant float& depth [[buffer(0)]]) {\n"
++     "  const float2 p[3] = { float2(-1,-1), float2(3,-1), float2(-1,3) };\n"
++     "  VOut o; o.pos = float4(p[vid], depth, 1.0);\n"
++     "  o.uv = float2((p[vid].x + 1.0) * 0.5, 1.0 - (p[vid].y + 1.0) * 0.5);\n"
++     "  return o;\n"
++     "}\n"
++     "fragment float4 vr_fs(VOut in [[stage_in]], texture2d<float> tex [[texture(0)]],\n"
++     "                      constant float& srgbDecode [[buffer(0)]]) {\n"
++     "  constexpr sampler s(filter::linear);\n"
++     "  float4 c = tex.sample(s, in.uv);\n"
++     // SPIKE KEYING, not a shipping technique: the engine clears its frame to
++     // OPAQUE black, so without this the game's empty space would paper over the
++     // whole view and there would be nothing for the world to hang IN. Dropping
++     // near-black fragments (which also skips their depth write) previews the
++     // diorama-over-passthrough look the donor's rung 2 gets properly, by
++     // clearing to alpha 0 instead.
++     "  if (all(c.rgb < 0.02)) { discard_fragment(); }\n"
++     "  if (srgbDecode > 0.5) { c.rgb = pow(c.rgb, float3(2.2)); }\n"
++     "  return float4(c.rgb, 1.0);\n"
++     "}\n";
++
++static id<MTLRenderPipelineState> sVrPipeline;
++static id<MTLDepthStencilState> sVrDepthState;
++// Mipmapped per-eye copies, latched as an atomic pair (see the copy site).
++static id<MTLTexture> sVrEyeCopy[2];
++static uint32_t sVrLastGen = 0;
++
++static void sm64_vr_build_pipeline(id<MTLDevice> dev, MTLPixelFormat colorFmt, MTLPixelFormat depthFmt) {
++    NSError *err = nil;
++    id<MTLLibrary> lib = [dev newLibraryWithSource:kSM64VRShader options:nil error:&err];
++    if (!lib) { NSLog(@"[vrspike] shader compile FAILED: %@", err.localizedDescription); return; }
++    MTLRenderPipelineDescriptor *pd = [MTLRenderPipelineDescriptor new];
++    pd.vertexFunction = [lib newFunctionWithName:@"vr_vs"];
++    pd.fragmentFunction = [lib newFunctionWithName:@"vr_fs"];
++    pd.colorAttachments[0].pixelFormat = colorFmt;
++    pd.depthAttachmentPixelFormat = depthFmt;
++    sVrPipeline = [dev newRenderPipelineStateWithDescriptor:pd error:&err];
++    if (!sVrPipeline) { NSLog(@"[vrspike] pipeline FAILED: %@", err.localizedDescription); return; }
++    MTLDepthStencilDescriptor *dd = [MTLDepthStencilDescriptor new];
++    dd.depthCompareFunction = MTLCompareFunctionAlways;
++    dd.depthWriteEnabled = YES; // the compositor reprojects on depth and rejects what it cannot read
++    sVrDepthState = [dev newDepthStencilStateWithDescriptor:dd];
++    NSLog(@"[vrspike] world pipeline built (colorFmt=%lu depthFmt=%lu)",
++          (unsigned long)colorFmt, (unsigned long)depthFmt);
++}
++
++// --- contract dump -----------------------------------------------------------
++//
++// Everything the drawable exposes about its shape, rendered into ONE string so a
++// change between styles is a string comparison rather than an eyeball diff of
++// scattered log lines. Logged on the first frame and on every change thereafter
++// — a live .mixed -> .full switch that alters the contract therefore announces
++// itself on the frame it happens.
++static NSString *sm64_vr_contract_string(cp_layer_renderer_t lr, cp_drawable_t drawable) {
++    cp_layer_renderer_configuration_t cfg = cp_layer_renderer_get_configuration(lr);
++    NSMutableString *s = [NSMutableString string];
++    [s appendFormat:@"layout=%u foveation=%d colorFmt=%lu depthFmt=%lu",
++        (unsigned)cp_layer_renderer_configuration_get_layout(cfg),
++        (int)cp_layer_renderer_configuration_get_foveation_enabled(cfg),
++        (unsigned long)cp_layer_renderer_configuration_get_color_format(cfg),
++        (unsigned long)cp_layer_renderer_configuration_get_depth_format(cfg)];
++
++    size_t views = cp_drawable_get_view_count(drawable);
++    size_t texcount = cp_drawable_get_texture_count(drawable);
++    size_t rmcount = cp_drawable_get_rasterization_rate_map_count(drawable);
++    simd_float2 dr = cp_drawable_get_depth_range(drawable);
++    [s appendFormat:@" | views=%zu textures=%zu ratemaps=%zu depthRange=[%.4f,%.4f] target=%d",
++        views, texcount, rmcount, (double)dr.x, (double)dr.y,
++        (int)cp_drawable_get_target(drawable)];
++
++    for (size_t t = 0; t < texcount; t++) {
++        id<MTLTexture> c = cp_drawable_get_color_texture(drawable, t);
++        id<MTLTexture> d = cp_drawable_get_depth_texture(drawable, t);
++        [s appendFormat:@" | tex%zu color=%lux%lu arr=%lu type=%lu fmt=%lu depth=%@",
++            t, (unsigned long)c.width, (unsigned long)c.height,
++            (unsigned long)c.arrayLength, (unsigned long)c.textureType,
++            (unsigned long)c.pixelFormat,
++            d ? [NSString stringWithFormat:@"%lux%lu arr=%lu fmt=%lu",
++                    (unsigned long)d.width, (unsigned long)d.height,
++                    (unsigned long)d.arrayLength, (unsigned long)d.pixelFormat]
++              : @"nil"];
++    }
++    for (size_t v = 0; v < views; v++) {
++        cp_view_t vw = cp_drawable_get_view(drawable, v);
++        cp_view_texture_map_t tm = cp_view_get_view_texture_map(vw);
++        MTLViewport vp = cp_view_texture_map_get_viewport(tm);
++        simd_float4x4 xf = cp_view_get_transform(vw);
++        [s appendFormat:@" | view%zu texIdx=%zu slice=%zu vp=(%.0f,%.0f %.0fx%.0f) eyePos=(%.4f,%.4f,%.4f)",
++            v, cp_view_texture_map_get_texture_index(tm),
++            cp_view_texture_map_get_slice_index(tm),
++            vp.originX, vp.originY, vp.width, vp.height,
++            (double)xf.columns[3].x, (double)xf.columns[3].y, (double)xf.columns[3].z];
++    }
++    return s;
++}
++
++// The A3 verification the charter calls non-negotiable, run here on the SPIKE's
++// own terms: the two views' eye transforms must differ by roughly an IPD along
++// eye-space X. Logged once. If this is not ~0.06 m the composition convention is
++// wrong and no amount of sign-flipping downstream will fix it.
++static void sm64_vr_log_ipd(cp_drawable_t drawable) {
++    if (cp_drawable_get_view_count(drawable) < 2) {
++        NSLog(@"[vrspike] IPD CHECK: only %zu view(s) — the SIMULATOR is mono, so this "
++               "check is device-only", cp_drawable_get_view_count(drawable));
++        return;
++    }
++    simd_float4x4 a = cp_view_get_transform(cp_drawable_get_view(drawable, 0));
++    simd_float4x4 b = cp_view_get_transform(cp_drawable_get_view(drawable, 1));
++    simd_float3 d = b.columns[3].xyz - a.columns[3].xyz;
++    NSLog(@"[vrspike] IPD CHECK: eye1-eye0 = (%.4f, %.4f, %.4f) m  |len|=%.4f m "
++           "(expect ~0.063 along X)", (double)d.x, (double)d.y, (double)d.z,
++          (double)simd_length(d));
++}
++
++void sm64_vr_spike_run(void *layer_renderer_ptr, int variant) {
++    cp_layer_renderer_t layer_renderer = (__bridge cp_layer_renderer_t)layer_renderer_ptr;
++    sm64_vr_spike_stop = 0;
++    sm64_vr_spike_running = 1;
++
++    NSLog(@"[vrspike] loop started (variant=%d)", variant);
++
++    id<MTLCommandQueue> queue = nil;
++    NSString *lastContract = nil;
++    int frames = 0;
++    int styleStage = 0; // variant 2's live-switch state machine
++
++    // R0.2: world mode, ON unless explicitly disabled. Default-on because the
++    // DEVICE has no env channel — the headset run is the one that matters, and
++    // it must show the world. SM64_VR_WORLD=0 gets R0.1's clear-only style probe
++    // back on the simulator.
++    {
++        const char *w = getenv("SM64_VR_WORLD");
++        sVrWorld = (w && *w == '0') ? 0 : 1;
++    }
++    sVrValid = 0;
++    sVrEyeCopy[0] = sVrEyeCopy[1] = nil;
++    sVrLastGen = sm64_metal_get_3d_pair_gen(); // wait for a pair rendered THIS session
++    bool frozenSet = false;
++    simd_float4x4 frozenHead = matrix_identity_float4x4;
++    NSLog(@"[vrspike] world mode = %d", sVrWorld);
++
++    ar_world_tracking_configuration_t wtc = ar_world_tracking_configuration_create();
++    ar_world_tracking_provider_t wtp = ar_world_tracking_provider_create(wtc);
++    ar_session_t arSession = ar_session_create();
++    ar_data_providers_t providers = ar_data_providers_create_with_data_providers(wtp, NULL);
++    ar_session_run(arSession, providers);
++
++    int running = 1;
++    while (running) {
++        if (sm64_vr_spike_stop) {
++            NSLog(@"[vrspike] stop requested, exiting (frames=%d)", frames);
++            running = 0;
++            continue;
++        }
++        switch (cp_layer_renderer_get_state(layer_renderer)) {
++            case cp_layer_renderer_state_paused:
++                cp_layer_renderer_wait_until_running(layer_renderer);
++                continue;
++            case cp_layer_renderer_state_invalidated:
++                NSLog(@"[vrspike] layer INVALIDATED, exiting (frames=%d)", frames);
++                running = 0;
++                continue;
++            case cp_layer_renderer_state_running:
++            default:
++                break;
++        }
++
++        @autoreleasepool {
++            cp_frame_t frame = cp_layer_renderer_query_next_frame(layer_renderer);
++            if (frame == NULL) { continue; }
++
++            cp_frame_timing_t timing = cp_frame_predict_timing(frame);
++            cp_frame_start_update(frame);
++            cp_frame_end_update(frame);
++            cp_time_wait_until(cp_frame_timing_get_optimal_input_time(timing));
++            // Release the engine's next paced frame here, exactly as the 3D loop
++            // does. WITHOUT this the engine's wait in
++            // produce_interpolation_frames_and_delay() times out at 50 ms and it
++            // renders at ~20 Hz into a 90 Hz compositor — stale eye pairs, which
++            // is its own source of "doubled" on anything that moves.
++            sm64_3d_pace_signal_now();
++            cp_frame_start_submission(frame);
++
++#pragma clang diagnostic push
++#pragma clang diagnostic ignored "-Wdeprecated-declarations"
++            cp_drawable_t drawable = cp_frame_query_drawable(frame);
++#pragma clang diagnostic pop
++            if (drawable == NULL) {
++                cp_frame_end_submission(frame);
++                continue;
++            }
++
++            if (queue == nil) {
++                id<MTLTexture> t0 = cp_drawable_get_color_texture(drawable, 0);
++                queue = [t0.device newCommandQueue];
++                sm64_vr_log_ipd(drawable);
++                if (sVrWorld) {
++                    sm64_vr_build_pipeline(t0.device, t0.pixelFormat,
++                                           cp_drawable_get_depth_texture(drawable, 0).pixelFormat);
++                }
++            }
++
++            // Contract dump: first frame and every change. The whole spike.
++            NSString *contract = sm64_vr_contract_string(layer_renderer, drawable);
++            if (lastContract == nil || ![contract isEqualToString:lastContract]) {
++                NSLog(@"[vrspike] CONTRACT (variant=%d frame=%d): %@", variant, frames, contract);
++                lastContract = contract;
++            }
++
++            CFTimeInterval presTime = cp_time_to_cf_time_interval(
++                cp_frame_timing_get_presentation_time(cp_drawable_get_frame_timing(drawable)));
++            ar_device_anchor_t anchor = ar_device_anchor_create();
++            ar_device_anchor_query_status_t anchorStatus =
++                ar_world_tracking_provider_query_device_anchor_at_timestamp(wtp, presTime, anchor);
++            cp_drawable_set_device_anchor(drawable, anchor);
++
++            // R0.2: freeze the pose ONCE tracking has converged (ARKit's first
++            // frames answer success with a near-identity pose — the same trap
++            // that put the 3D panel on the floor), then compose EyeVP and hand
++            // it to the engine. Frozen, so nothing after this depends on pose
++            // plumbing.
++            if (sVrWorld && (!frozenSet || sVrRefreeze) && frames > 30 &&
++                anchorStatus == ar_device_anchor_query_status_success) {
++                sVrRefreeze = 0;
++                frozenHead = ar_device_anchor_get_origin_from_anchor_transform(anchor);
++                frozenSet = true;
++                NSLog(@"[vrspike] pose FROZEN at head (%.2f,%.2f,%.2f)",
++                      (double)frozenHead.columns[3].x, (double)frozenHead.columns[3].y,
++                      (double)frozenHead.columns[3].z);
++                sm64_vr_build_matrices(drawable, frozenHead, true);
++            } else if (sVrWorld && frozenSet) {
++                // Every frame: the pose stays frozen, but the TUNABLES are live,
++                // so dragging a slider moves the world while you look at it —
++                // the donor's whole "tuned by feel" workflow.
++                sm64_vr_build_matrices(drawable, frozenHead, false);
++            }
++
++            id<MTLCommandBuffer> cb = [queue commandBuffer];
++
++            // ATOMIC EYE PAIR (the trap this tree already paid for once — 3D
++            // batch 3 item 1b). The engine renders L then R sequentially, so
++            // sampling "whatever is latest" per eye can pair L from frame N with
++            // R from frame N-1: a per-eye TIME skew, which reads as doubling on
++            // everything that moves. Copy both eyes only when the pair
++            // generation has advanced, and otherwise re-show the pair we already
++            // have — the two eyes are then always the same instant.
++            if (sVrWorld) {
++                uint32_t gen = sm64_metal_get_3d_pair_gen();
++                if (gen != sVrLastGen) {
++                    sVrLastGen = gen;
++                    for (int e = 0; e < 2; e++) {
++                        id<MTLTexture> src =
++                            (__bridge id<MTLTexture>)sm64_metal_get_3d_eye_texture(e + 1);
++                        if (src == nil || src.device != queue.device) { continue; }
++                        if (sVrEyeCopy[e] == nil || sVrEyeCopy[e].width != src.width ||
++                            sVrEyeCopy[e].height != src.height ||
++                            sVrEyeCopy[e].pixelFormat != src.pixelFormat) {
++                            MTLTextureDescriptor *td = [MTLTextureDescriptor
++                                texture2DDescriptorWithPixelFormat:src.pixelFormat
++                                                             width:src.width
++                                                            height:src.height
++                                                         mipmapped:YES];
++                            td.usage = MTLTextureUsageShaderRead | MTLTextureUsageRenderTarget;
++                            td.storageMode = MTLStorageModePrivate;
++                            sVrEyeCopy[e] = [src.device newTextureWithDescriptor:td];
++                        }
++                        id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
++                        [blit copyFromTexture:src toTexture:sVrEyeCopy[e]];
++                        if (sVrEyeCopy[e].mipmapLevelCount > 1) {
++                            [blit generateMipmapsForTexture:sVrEyeCopy[e]];
++                        }
++                        [blit endEncoding];
++                    }
++                }
++            }
++
++            size_t views = cp_drawable_get_view_count(drawable);
++            for (size_t v = 0; v < views; v++) {
++                cp_view_t vw = cp_drawable_get_view(drawable, v);
++                cp_view_texture_map_t tm = cp_view_get_view_texture_map(vw);
++                size_t texIdx = cp_view_texture_map_get_texture_index(tm);
++                size_t slice = cp_view_texture_map_get_slice_index(tm);
++                MTLViewport vp = cp_view_texture_map_get_viewport(tm);
++
++                MTLRenderPassDescriptor *pass = [MTLRenderPassDescriptor renderPassDescriptor];
++                pass.colorAttachments[0].texture = cp_drawable_get_color_texture(drawable, texIdx);
++                pass.colorAttachments[0].slice = slice;
++                pass.colorAttachments[0].loadAction = MTLLoadActionClear;
++                pass.colorAttachments[0].storeAction = MTLStoreActionStore;
++                // PARTIAL ALPHA on purpose: in .mixed the room must show through
++                // this wash; in .full it must not. Distinct hue per eye so a
++                // mono/duplicated presentation is visible rather than assumed.
++                pass.colorAttachments[0].clearColor = sVrWorld
++                    ? MTLClearColorMake(0.0, 0.0, 0.0, 0.0)       // world: passthrough behind it
++                    : ((v == 0) ? MTLClearColorMake(0.10, 0.35, 0.90, 0.50)   // left: blue
++                                : MTLClearColorMake(0.90, 0.30, 0.10, 0.50)); // right: orange
++                size_t rmCount = cp_drawable_get_rasterization_rate_map_count(drawable);
++                if (rmCount > 0) {
++                    pass.rasterizationRateMap = cp_drawable_get_rasterization_rate_map(
++                        drawable, texIdx < rmCount ? texIdx : 0);
++                }
++                id<MTLTexture> depthTex = cp_drawable_get_depth_texture(drawable, texIdx);
++                if (depthTex) {
++                    pass.depthAttachment.texture = depthTex;
++                    pass.depthAttachment.slice = slice;
++                    pass.depthAttachment.loadAction = MTLLoadActionClear;
++                    pass.depthAttachment.storeAction = MTLStoreActionStore;
++                    pass.depthAttachment.clearDepth = 1.0;
++                }
++                id<MTLRenderCommandEncoder> enc = [cb renderCommandEncoderWithDescriptor:pass];
++                [enc setViewport:vp];
++
++                // R0.2: paint this eye's engine render over the whole slice.
++                if (sVrWorld && sVrValid && sVrPipeline) {
++                    id<MTLTexture> src = (v < 2) ? sVrEyeCopy[v] : sVrEyeCopy[0];
++                    if (src == nil) { src = sVrEyeCopy[0] ? sVrEyeCopy[0] : sVrEyeCopy[1]; }
++                    if (src != nil) {
++                        // Reverse-Z depth for the whole image at the diorama's
++                        // distance. The compositor takes ONLY reverse-Z here
++                        // (1 = near), which is exactly why the engine's own
++                        // projection had to stay forward-Z: the two conventions
++                        // meet at this line and nowhere else.
++                        simd_float2 dr = cp_drawable_get_depth_range(drawable);
++                        float znDrawable = (dr.y > 0.0001f) ? dr.y : 0.1f;
++                        float depth = znDrawable / (sVrDist + 1.0f);
++                        if (depth > 1.0f) { depth = 1.0f; }
++                        float srgbDecode =
++                            (src.pixelFormat == MTLPixelFormatBGRA8Unorm ||
++                             src.pixelFormat == MTLPixelFormatRGBA8Unorm) ? 1.0f : 0.0f;
++                        [enc setRenderPipelineState:sVrPipeline];
++                        [enc setDepthStencilState:sVrDepthState];
++                        [enc setVertexBytes:&depth length:sizeof(depth) atIndex:0];
++                        [enc setFragmentBytes:&srgbDecode length:sizeof(srgbDecode) atIndex:0];
++                        [enc setFragmentTexture:src atIndex:0];
++                        [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
++                    }
++                }
++                [enc endEncoding];
++            }
++
++            cp_drawable_encode_present(drawable, cb);
++            [cb commit];
++            cp_frame_end_submission(frame);
++
++            frames++;
++            if (frames == 1 || frames == 10 || (frames % 300) == 0) {
++                NSLog(@"[vrspike] variant=%d frame=%d PRESENTED (survived encode_present)",
++                      variant, frames);
++            }
++
++            // Variant 2, clear-only probe: drive a LIVE style switch off this
++            // loop's own frame clock. ~90 Hz on device, ~60 on the sim, so the
++            // stages are a few seconds apart either way. If a switch changes the
++            // contract, the dump above prints it; if it aborts, the log simply
++            // stops here. In WORLD mode the ornament's Passthrough/Full button
++            // drives the same switch by hand instead — an automatic flip every
++            // few seconds is unreadable when there is a world to look at.
++            if (variant == 2 && !sVrWorld) {
++                if (styleStage == 0 && frames >= 240) {
++                    styleStage = 1;
++                    NSLog(@"[vrspike] LIVE SWITCH -> .full (frame %d)", frames);
++                    SM64_SetVRSpikeStyleFull(true);
++                } else if (styleStage == 1 && frames >= 540) {
++                    styleStage = 2;
++                    NSLog(@"[vrspike] LIVE SWITCH -> .mixed (frame %d)", frames);
++                    SM64_SetVRSpikeStyleFull(false);
++                } else if (styleStage == 2 && frames >= 840) {
++                    styleStage = 3;
++                    NSLog(@"[vrspike] LIVE SWITCH -> .full again (frame %d)", frames);
++                    SM64_SetVRSpikeStyleFull(true);
++                }
++            }
++        } // @autoreleasepool
++    }
++
++    // Hand the projection back to the panel path BEFORE the thread dies, or the
++    // engine keeps composing a VR matrix into a frame nobody is showing in VR.
++    sVrValid = 0;
++    sVrPipeline = nil;
++    sVrDepthState = nil;
++    sVrEyeCopy[0] = sVrEyeCopy[1] = nil;
++    NSLog(@"[vrspike] loop finished (variant=%d frames=%d)", variant, frames);
++    sm64_vr_spike_running = 0;
++}
++
++#endif // SM64_VISION_3D
 --- a/src/pc/gfx/gfx_pc.c
 +++ b/src/pc/gfx/gfx_pc.c
-@@ -657,8 +657,142 @@
+@@ -657,8 +657,172 @@
  
      gfx_transposed_matrix_mul(coeffs, light_dir, rsp.modelview_matrix_stack[rsp.modelview_matrix_stack_size - 1]);
      vec3f_normalize(coeffs);
@@ -2558,7 +3516,7 @@ WHAT IS NOT TOUCHED
 +void sm64_gfx_set_3d_eye(int eye) {
 +    sm64_gfx_3d_eye = (eye >= SM64_EYE_OFF && eye <= SM64_EYE_RIGHT) ? eye : SM64_EYE_OFF;
  }
- 
++
 +void sm64_gfx_set_3d_params(float separation, float convergence, float hud_depth) {
 +    if (separation >= 0.0f && separation <= 60.0f) { sm64_gfx_3d_sep = separation; } // clamp raised 40->60 for the 2026-07-23 depth rescale (new slider max 54)
 +    if (convergence >= 50.0f && convergence <= 8000.0f) { sm64_gfx_3d_conv = convergence; }
@@ -2567,9 +3525,39 @@ WHAT IS NOT TOUCHED
 +
 +static Mat4 sm64_gfx_eye_P;
 +
++// R0 SPIKE (throwaway — VR-CHARTER §5 R0.2 / A3). The VR path replaces the
++// projection outright with the composed camera-space -> eye-clip matrix
++// (EyeVP = A * V * P) the compositor loop publishes, instead of skewing the
++// game's own projection the way the panel's stereo does. Returns NULL whenever
++// VR is not driving, so the panel path below is byte-for-byte unchanged.
++const float *sm64_vr_eye_viewproj(int eye);   // sm64_vr_spike.m
++int          sm64_vr_hide_background(void);   // 1 = drop the ortho skybox
+ 
 +// The projection to compose into MP for the eye currently in flight.
 +static float (*gfx_stereo_projection(void))[4] {
 +    if (sm64_gfx_3d_eye == SM64_EYE_OFF) { return rsp.P_matrix; }
++
++    // R0 SPIKE: VR override. Perspective geometry takes the published EyeVP;
++    // the ORTHO layer has no meaningful place in a surrounding world yet, so the
++    // background (SM64's skybox is a FULLSCREEN ortho image, not a dome) is
++    // pushed outside the frustum and clipped away — otherwise it papers over the
++    // whole view and there is nothing to see the world hang in. The HUD/menu
++    // ortho is left alone so there is a familiar reference in frame.
++    {
++        const float *vrm = sm64_vr_eye_viewproj(sm64_gfx_3d_eye);
++        if (vrm != NULL) {
++            if (rsp.P_matrix[3][3] > 0.5f) {
++                if (sm64_gfx_bg_layer && sm64_vr_hide_background()) {
++                    mtxf_copy(sm64_gfx_eye_P, rsp.P_matrix);
++                    sm64_gfx_eye_P[3][0] += 10.0f; // ortho w == 1 => NDC x ~ +10, fully clipped
++                    return sm64_gfx_eye_P;
++                }
++                return rsp.P_matrix;
++            }
++            memcpy(sm64_gfx_eye_P, vrm, sizeof(sm64_gfx_eye_P));
++            return sm64_gfx_eye_P;
++        }
++    }
 +
 +    // Signed half-separation for this eye.
 +    const float e = (sm64_gfx_3d_eye == SM64_EYE_RIGHT ? 1.0f : -1.0f) * 0.5f * sm64_gfx_3d_sep;
@@ -2650,7 +3638,7 @@ WHAT IS NOT TOUCHED
  static void OPTIMIZE_O3 gfx_sp_matrix(uint8_t parameters, const int32_t *addr) {
  
      Mat4 matrix;
-@@ -705,7 +839,7 @@
+@@ -705,7 +869,7 @@
          }
          rsp.lights_changed = 1;
      }
@@ -2659,7 +3647,7 @@ WHAT IS NOT TOUCHED
  }
  
  static void gfx_sp_pop_matrix(uint32_t count) {
-@@ -713,7 +847,7 @@
+@@ -713,7 +877,7 @@
          if (rsp.modelview_matrix_stack_size > 0) {
              --rsp.modelview_matrix_stack_size;
              if (rsp.modelview_matrix_stack_size > 0) {
@@ -2668,7 +3656,7 @@ WHAT IS NOT TOUCHED
              }
          }
      }
-@@ -2050,6 +2184,12 @@
+@@ -2050,6 +2214,12 @@
  }
  
  static void gfx_sp_reset(void) {
@@ -2681,7 +3669,7 @@ WHAT IS NOT TOUCHED
      rsp.modelview_matrix_stack_size = 1;
      rsp.current_num_lights = 2;
      rsp.lights_changed = true;
-@@ -2078,6 +2218,11 @@
+@@ -2078,6 +2248,11 @@
      return gfx_rapi;
  }
  
@@ -2693,7 +3681,7 @@ WHAT IS NOT TOUCHED
  void gfx_start_frame(void) {
      if (gGfxPcResetTex1 > 0) {
          gGfxPcResetTex1--;
-@@ -2086,6 +2231,21 @@
+@@ -2086,6 +2261,21 @@
      }
      gfx_wapi->handle_events();
      gfx_wapi->get_dimensions(&gfx_current_dimensions.width, &gfx_current_dimensions.height);
@@ -2715,7 +3703,7 @@ WHAT IS NOT TOUCHED
      if (gfx_current_dimensions.height == 0) {
          // Avoid division by zero
          gfx_current_dimensions.height = 1;
-@@ -2100,6 +2260,42 @@
+@@ -2100,6 +2290,42 @@
  }
  
  void gfx_run(Gfx *commands) {
@@ -2758,7 +3746,7 @@ WHAT IS NOT TOUCHED
      gfx_sp_reset();
  
      sHasInverseCameraMatrix = false;
-@@ -2458,6 +2654,17 @@
+@@ -2458,6 +2684,17 @@
  void OPTIMIZE_O3 ext_gfx_run_dl(Gfx* cmd) {
      uint32_t opcode = cmd->words.w0 >> 24;
      switch (opcode) {

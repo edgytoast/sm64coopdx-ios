@@ -575,6 +575,12 @@ static void sm64_pace_signal(void) {
     pthread_mutex_unlock(&sm64_pace_mtx);
 }
 
+// R0 SPIKE (throwaway): the VR probe loop is a SECOND compositor loop, and the
+// engine's wait below does not care which loop releases it — only that something
+// does, once per compositor frame. Without this the VR loop leaves the engine on
+// the 50 ms timeout path (~20 Hz into a 90 Hz compositor).
+void sm64_3d_pace_signal_now(void) { sm64_pace_signal(); }
+
 bool sm64_3d_wait_for_compositor_frame(void) {
     struct timespec ts;
     clock_gettime(CLOCK_REALTIME, &ts);

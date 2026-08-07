@@ -1,0 +1,613 @@
+// sm64_vr_spike.m — R0 SPIKE, THROWAWAY. See sm64_vr_spike.h for the question
+// this exists to answer (VR-CHARTER §5 R0.1 / A7).
+//
+// The minimum loop that can present, plus a contract dump. Everything about the
+// loop SHAPE is copied deliberately from sm64_immersive.m rather than rewritten:
+// pacing (cp_frame_predict_timing + cp_time_wait_until), a per-frame ARKit
+// device anchor, a queue from the DRAWABLE's device, and cleared+stored depth
+// are each individually load-bearing — a frame missing any of them is silently
+// never displayed, which would read as "the style aborted" when it did not.
+
+#import "sm64_vr_spike.h"
+
+#ifdef SM64_VISION_3D
+
+#import <CompositorServices/CompositorServices.h>
+#import <Metal/Metal.h>
+#import <ARKit/ARKit.h>
+#import <simd/simd.h>
+#import <Foundation/Foundation.h>
+
+volatile int sm64_vr_spike_stop = 0;
+volatile int sm64_vr_spike_running = 0;
+volatile int sm64_vr_spike_variant = 0;
+
+// ---------------------------------------------------------------------------
+// R0.2 — the frozen-pose world (VR-CHARTER §5 R0.2 / A3).
+//
+// The compositor loop composes EyeVP = P * V * A once, from a device anchor
+// captured ONCE, and publishes it; gfx_stereo_projection returns it instead of
+// the game's projection for every perspective draw. Frozen on purpose: a live
+// per-frame pose is R1, and separating the two means a wrong-looking world here
+// is a MATRIX bug and never a pose-plumbing bug.
+//
+// THE CONVENTION BRIDGE, which is the whole risk in this file:
+//   - simd is COLUMN-vector, column-major:  clip = M * p
+//   - fast3d is ROW-vector:                 clip = v * M,  M[row][col]
+//   A simd_float4x4 reinterpreted as a C float[4][4] indexed [i][j] yields
+//   columns[i][j] — which IS the transpose. So memcpy of the composed simd
+//   matrix into the fast3d array is the entire conversion, and the factors
+//   multiply in the mirrored order (simd P*V*A  <=>  fast3d A*V*P), exactly the
+//   donor's A * V * P.
+// ---------------------------------------------------------------------------
+
+// Donor "Diorama" preset (vr.c:1503) — now including the two comfort levers the
+// first device build shipped WITHOUT, which is why it doubled (Austin,
+// 2026-08-07: "VERY close up to my face and doubled, almost like I'm looking
+// crosseyed"):
+//
+//   STEREO SCALE. The donor scales each eye's offset from the head centre and
+//   its own comment names this exact failure: "1.0 = true IPD, lower = gentler
+//   stereo / LESS CROSS-EYE" (vr.c:367). Every donor preset ships 0.50. The
+//   first spike build rendered at 1.0 — a full physical IPD on a world 25 cm
+//   away is disparity no one can fuse. This is NOT a sign flip by feel (charter
+//   §10); it is a documented lever ported from a build that demonstrably fuses.
+//
+//   STANDOFF. The donor keeps the anchor at least sClipMargin = 0.30 m from the
+//   head (vr.c:288/519, the anti-clip's resting behaviour). At 0.25 m the world
+//   is inside that margin before you even lean in.
+//
+// Live-tunable from the settings sheet, because the donor's own numbers are
+// annotated "tuned by feel" and the headset is the only instrument that counts.
+static float sVrScale  = 1376.0f; // game units per metre (bigger = smaller world)
+static float sVrDist   = 0.60f;   // metres in front of the frozen head (donor 0.25, pushed out after the device report)
+static float sVrHeight = -0.35f;  // metres relative to eye level
+static float sVrStereo = 0.50f;   // eye offset as a fraction of the true IPD
+static const float kVrClipMargin = 0.30f; // donor sClipMargin: minimum anchor standoff
+
+void sm64_vr_spike_set_tunables(float scale, float dist, float height, float stereo) {
+    if (scale  >= 100.0f && scale <= 20000.0f) { sVrScale  = scale;  }
+    if (dist   >= -1.0f  && dist  <= 5.0f)     { sVrDist   = dist;   }
+    if (height >= -3.0f  && height <= 3.0f)    { sVrHeight = height; }
+    if (stereo >= 0.0f   && stereo <= 1.5f)    { sVrStereo = stereo; }
+}
+
+// Re-freeze the head pose on the next tracked frame. If "too close to my face"
+// turns out to be a BAD CAPTURE (a pose read before tracking settled — the trap
+// that once put the 3D panel on the floor) rather than a placement number, this
+// button is what tells the two apart.
+static volatile int sVrRefreeze = 0;
+void sm64_vr_spike_recenter(void) { sVrRefreeze = 1; }
+
+static float sVrEyeVP[2][4][4];
+static volatile int sVrValid = 0;      // read by the ENGINE thread
+static int sVrWorld = 0;               // world mode on (vs the clear-only probe)
+
+// Called from gfx_stereo_projection on the engine thread, once per matrix
+// composition — kept to a flag test and a pointer.
+const float *sm64_vr_eye_viewproj(int eye) {
+    if (!sVrValid || eye < 1 || eye > 2) { return NULL; }
+    return &sVrEyeVP[eye - 1][0][0];
+}
+
+int sm64_vr_hide_background(void) { return sVrWorld; }
+
+// Forward-Z projection from the drawable's own per-eye tangents.
+//
+// NOT cp_drawable_compute_projection used directly, and this is an R0 FINDING
+// rather than a preference: the compositor only supports REVERSE-Z for the
+// drawable's depth (drawable.h: "It only supports reverse-Z depth ... 1 for
+// near 0 for far"), while the engine renders forward-Z (clear 1.0, less-equal)
+// on every other target it owns. Handing the engine a reverse-Z projection
+// inverts its depth test and sorts the world back-to-front. So the ASYMMETRIC
+// FRUSTUM is taken from the compositor's matrix — recovered exactly, no
+// hand-rolled FOV — and only the depth mapping is rebuilt forward.
+//
+//   m00 = 2/(tR-tL), m20 = (tR+tL)/(tR-tL)  =>  tR = (m20+1)/m00, tL = (m20-1)/m00
+static simd_float4x4 sm64_vr_forward_z_projection(simd_float4x4 cpProj, float zn, float zf) {
+    float m00 = cpProj.columns[0].x, m11 = cpProj.columns[1].y;
+    float m20 = cpProj.columns[2].x, m21 = cpProj.columns[2].y;
+    if (fabsf(m00) < 1e-6f) { m00 = 1.0f; }
+    if (fabsf(m11) < 1e-6f) { m11 = 1.0f; }
+    float tR = (m20 + 1.0f) / m00, tL = (m20 - 1.0f) / m00;
+    float tU = (m21 + 1.0f) / m11, tD = (m21 - 1.0f) / m11;
+
+    simd_float4x4 P = (simd_float4x4){{ {0,0,0,0}, {0,0,0,0}, {0,0,0,0}, {0,0,0,0} }};
+    P.columns[0].x = 2.0f / (tR - tL);
+    P.columns[1].y = 2.0f / (tU - tD);
+    P.columns[2].x = (tR + tL) / (tR - tL);
+    P.columns[2].y = (tU + tD) / (tU - tD);
+    P.columns[2].z = zf / (zn - zf);   // -zn -> 0, -zf -> 1 (Metal's 0..1 clip z)
+    P.columns[2].w = -1.0f;
+    P.columns[3].z = zn * zf / (zn - zf);
+    return P;
+}
+
+// Place the game's camera space in the room: camera origin sVrDist ahead of the
+// frozen head at kVrHeight, facing the way the head faced (levelled — no pitch
+// or roll leaks into the world, the same rule the 3D panel already follows).
+static simd_float4x4 sm64_vr_placement(simd_float4x4 frozenHead) {
+    simd_float3 headPos = frozenHead.columns[3].xyz;
+    simd_float3 fwd = -frozenHead.columns[2].xyz;
+    fwd.y = 0.0f;
+    float len = simd_length(fwd);
+    fwd = (len < 1e-4f) ? simd_make_float3(0, 0, -1) : fwd / len;
+
+    // Donor standoff (vr.c:519): never let the anchor sit closer than the clip
+    // margin. Frozen-pose, so this is the resting case of the donor's anti-clip
+    // — the lean-in tracking is R2 work.
+    float dist = (sVrDist < kVrClipMargin) ? kVrClipMargin : sVrDist;
+    simd_float3 pos = headPos + fwd * dist;
+    pos.y += sVrHeight;
+
+    simd_float3 zAxis = -fwd;                                   // camera looks down -Z
+    simd_float3 yAxis = simd_make_float3(0, 1, 0);
+    simd_float3 xAxis = simd_normalize(simd_cross(yAxis, zAxis));
+    yAxis = simd_cross(zAxis, xAxis);
+
+    simd_float4x4 m;
+    m.columns[0] = simd_make_float4(xAxis, 0.0f);
+    m.columns[1] = simd_make_float4(yAxis, 0.0f);
+    m.columns[2] = simd_make_float4(zAxis, 0.0f);
+    m.columns[3] = simd_make_float4(pos, 1.0f);
+    return m;
+}
+
+// Rebuilt EVERY frame (two 4x4 multiplies per eye — nothing) so the settings
+// sliders move the world while you drag them. The POSE is still frozen: this is
+// R0, and keeping the pose out of the loop means a world that looks wrong is a
+// matrix or a number, never pose plumbing.
+static void sm64_vr_build_matrices(cp_drawable_t drawable, simd_float4x4 frozenHead, bool logIt) {
+    const float invS = 1.0f / sVrScale;
+    simd_float4x4 scale = matrix_identity_float4x4;
+    scale.columns[0].x = invS; scale.columns[1].y = invS; scale.columns[2].z = invS;
+    simd_float4x4 A = simd_mul(sm64_vr_placement(frozenHead), scale);
+
+    // Clip planes in METRES (A has already taken game units out). Near 0.05 is
+    // the donor's decal z-fight lesson; far tracks the world's scaled size.
+    const float zn = 0.05f;
+    const float zf = 8000.0f * invS * 3.0f + 5.0f;
+
+    size_t views = cp_drawable_get_view_count(drawable);
+
+    // Cyclopean centre of the eyes in DEVICE space, so the stereo scale shrinks
+    // the offsets around the head centre exactly as the donor does
+    // (vr.c:507-509) instead of around one eye — which would swing the whole
+    // world sideways as the slider moves.
+    simd_float3 centre = simd_make_float3(0, 0, 0);
+    if (views >= 2) {
+        simd_float3 e0 = cp_view_get_transform(cp_drawable_get_view(drawable, 0)).columns[3].xyz;
+        simd_float3 e1 = cp_view_get_transform(cp_drawable_get_view(drawable, 1)).columns[3].xyz;
+        centre = (e0 + e1) * 0.5f;
+    }
+
+    for (size_t v = 0; v < 2; v++) {
+        size_t src = (v < views) ? v : 0;   // the SIMULATOR is mono: both eyes take view 0
+        cp_view_t view = cp_drawable_get_view(drawable, src);
+        simd_float4x4 deviceFromEye = cp_view_get_transform(view);
+        // THE COMFORT LEVER (donor vr.c:507-509). Rotation untouched — only the
+        // eye's offset from the head centre is scaled, so the frustum stays the
+        // runtime's own and only the parallax softens.
+        simd_float3 eyePos = deviceFromEye.columns[3].xyz;
+        simd_float3 scaled = centre + (eyePos - centre) * sVrStereo;
+        deviceFromEye.columns[3] = simd_make_float4(scaled, 1.0f);
+
+        simd_float4x4 eyeFromOrigin = simd_inverse(simd_mul(frozenHead, deviceFromEye));
+        simd_float4x4 cpProj = matrix_identity_float4x4;
+        if (__builtin_available(visionOS 2.0, *)) {
+            cpProj = cp_drawable_compute_projection(
+                drawable, cp_axis_direction_convention_right_up_back, src);
+        }
+        simd_float4x4 P = sm64_vr_forward_z_projection(cpProj, zn, zf);
+        simd_float4x4 M = simd_mul(P, simd_mul(eyeFromOrigin, A));
+        memcpy(&sVrEyeVP[v][0][0], &M, sizeof(sVrEyeVP[v])); // simd column-major == fast3d transpose
+        if (logIt) {
+            NSLog(@"[vrspike] EyeVP[%zu] view %zu: eye(%.4f,%.4f,%.4f) -> scaled(%.4f,%.4f,%.4f)",
+                  v, src, (double)eyePos.x, (double)eyePos.y, (double)eyePos.z,
+                  (double)scaled.x, (double)scaled.y, (double)scaled.z);
+        }
+    }
+    if (logIt) {
+        NSLog(@"[vrspike] matrices published (scale=%.0f u/m dist=%.2fm(min %.2f) height=%.2fm "
+               "stereo=%.2f zn=%.3f zf=%.1f)",
+              sVrScale, sVrDist, kVrClipMargin, sVrHeight, sVrStereo, zn, zf);
+    }
+    sVrValid = 1;
+}
+
+// --- the fullscreen eye copy -------------------------------------------------
+//
+// "Full-slice blit" as a DRAW rather than a blit encoder: the engine texture and
+// the drawable disagree on pixel format (and, on device, on size), which a blit
+// encoder cannot bridge — and a draw can also write the drawable's depth in the
+// same pass, which the compositor requires.
+static NSString *const kSM64VRShader =
+    @"#include <metal_stdlib>\n"
+     "using namespace metal;\n"
+     "struct VOut { float4 pos [[position]]; float2 uv; };\n"
+     "vertex VOut vr_vs(uint vid [[vertex_id]], constant float& depth [[buffer(0)]]) {\n"
+     "  const float2 p[3] = { float2(-1,-1), float2(3,-1), float2(-1,3) };\n"
+     "  VOut o; o.pos = float4(p[vid], depth, 1.0);\n"
+     "  o.uv = float2((p[vid].x + 1.0) * 0.5, 1.0 - (p[vid].y + 1.0) * 0.5);\n"
+     "  return o;\n"
+     "}\n"
+     "fragment float4 vr_fs(VOut in [[stage_in]], texture2d<float> tex [[texture(0)]],\n"
+     "                      constant float& srgbDecode [[buffer(0)]]) {\n"
+     "  constexpr sampler s(filter::linear);\n"
+     "  float4 c = tex.sample(s, in.uv);\n"
+     // SPIKE KEYING, not a shipping technique: the engine clears its frame to
+     // OPAQUE black, so without this the game's empty space would paper over the
+     // whole view and there would be nothing for the world to hang IN. Dropping
+     // near-black fragments (which also skips their depth write) previews the
+     // diorama-over-passthrough look the donor's rung 2 gets properly, by
+     // clearing to alpha 0 instead.
+     "  if (all(c.rgb < 0.02)) { discard_fragment(); }\n"
+     "  if (srgbDecode > 0.5) { c.rgb = pow(c.rgb, float3(2.2)); }\n"
+     "  return float4(c.rgb, 1.0);\n"
+     "}\n";
+
+static id<MTLRenderPipelineState> sVrPipeline;
+static id<MTLDepthStencilState> sVrDepthState;
+// Mipmapped per-eye copies, latched as an atomic pair (see the copy site).
+static id<MTLTexture> sVrEyeCopy[2];
+static uint32_t sVrLastGen = 0;
+
+static void sm64_vr_build_pipeline(id<MTLDevice> dev, MTLPixelFormat colorFmt, MTLPixelFormat depthFmt) {
+    NSError *err = nil;
+    id<MTLLibrary> lib = [dev newLibraryWithSource:kSM64VRShader options:nil error:&err];
+    if (!lib) { NSLog(@"[vrspike] shader compile FAILED: %@", err.localizedDescription); return; }
+    MTLRenderPipelineDescriptor *pd = [MTLRenderPipelineDescriptor new];
+    pd.vertexFunction = [lib newFunctionWithName:@"vr_vs"];
+    pd.fragmentFunction = [lib newFunctionWithName:@"vr_fs"];
+    pd.colorAttachments[0].pixelFormat = colorFmt;
+    pd.depthAttachmentPixelFormat = depthFmt;
+    sVrPipeline = [dev newRenderPipelineStateWithDescriptor:pd error:&err];
+    if (!sVrPipeline) { NSLog(@"[vrspike] pipeline FAILED: %@", err.localizedDescription); return; }
+    MTLDepthStencilDescriptor *dd = [MTLDepthStencilDescriptor new];
+    dd.depthCompareFunction = MTLCompareFunctionAlways;
+    dd.depthWriteEnabled = YES; // the compositor reprojects on depth and rejects what it cannot read
+    sVrDepthState = [dev newDepthStencilStateWithDescriptor:dd];
+    NSLog(@"[vrspike] world pipeline built (colorFmt=%lu depthFmt=%lu)",
+          (unsigned long)colorFmt, (unsigned long)depthFmt);
+}
+
+// --- contract dump -----------------------------------------------------------
+//
+// Everything the drawable exposes about its shape, rendered into ONE string so a
+// change between styles is a string comparison rather than an eyeball diff of
+// scattered log lines. Logged on the first frame and on every change thereafter
+// — a live .mixed -> .full switch that alters the contract therefore announces
+// itself on the frame it happens.
+static NSString *sm64_vr_contract_string(cp_layer_renderer_t lr, cp_drawable_t drawable) {
+    cp_layer_renderer_configuration_t cfg = cp_layer_renderer_get_configuration(lr);
+    NSMutableString *s = [NSMutableString string];
+    [s appendFormat:@"layout=%u foveation=%d colorFmt=%lu depthFmt=%lu",
+        (unsigned)cp_layer_renderer_configuration_get_layout(cfg),
+        (int)cp_layer_renderer_configuration_get_foveation_enabled(cfg),
+        (unsigned long)cp_layer_renderer_configuration_get_color_format(cfg),
+        (unsigned long)cp_layer_renderer_configuration_get_depth_format(cfg)];
+
+    size_t views = cp_drawable_get_view_count(drawable);
+    size_t texcount = cp_drawable_get_texture_count(drawable);
+    size_t rmcount = cp_drawable_get_rasterization_rate_map_count(drawable);
+    simd_float2 dr = cp_drawable_get_depth_range(drawable);
+    [s appendFormat:@" | views=%zu textures=%zu ratemaps=%zu depthRange=[%.4f,%.4f] target=%d",
+        views, texcount, rmcount, (double)dr.x, (double)dr.y,
+        (int)cp_drawable_get_target(drawable)];
+
+    for (size_t t = 0; t < texcount; t++) {
+        id<MTLTexture> c = cp_drawable_get_color_texture(drawable, t);
+        id<MTLTexture> d = cp_drawable_get_depth_texture(drawable, t);
+        [s appendFormat:@" | tex%zu color=%lux%lu arr=%lu type=%lu fmt=%lu depth=%@",
+            t, (unsigned long)c.width, (unsigned long)c.height,
+            (unsigned long)c.arrayLength, (unsigned long)c.textureType,
+            (unsigned long)c.pixelFormat,
+            d ? [NSString stringWithFormat:@"%lux%lu arr=%lu fmt=%lu",
+                    (unsigned long)d.width, (unsigned long)d.height,
+                    (unsigned long)d.arrayLength, (unsigned long)d.pixelFormat]
+              : @"nil"];
+    }
+    for (size_t v = 0; v < views; v++) {
+        cp_view_t vw = cp_drawable_get_view(drawable, v);
+        cp_view_texture_map_t tm = cp_view_get_view_texture_map(vw);
+        MTLViewport vp = cp_view_texture_map_get_viewport(tm);
+        simd_float4x4 xf = cp_view_get_transform(vw);
+        [s appendFormat:@" | view%zu texIdx=%zu slice=%zu vp=(%.0f,%.0f %.0fx%.0f) eyePos=(%.4f,%.4f,%.4f)",
+            v, cp_view_texture_map_get_texture_index(tm),
+            cp_view_texture_map_get_slice_index(tm),
+            vp.originX, vp.originY, vp.width, vp.height,
+            (double)xf.columns[3].x, (double)xf.columns[3].y, (double)xf.columns[3].z];
+    }
+    return s;
+}
+
+// The A3 verification the charter calls non-negotiable, run here on the SPIKE's
+// own terms: the two views' eye transforms must differ by roughly an IPD along
+// eye-space X. Logged once. If this is not ~0.06 m the composition convention is
+// wrong and no amount of sign-flipping downstream will fix it.
+static void sm64_vr_log_ipd(cp_drawable_t drawable) {
+    if (cp_drawable_get_view_count(drawable) < 2) {
+        NSLog(@"[vrspike] IPD CHECK: only %zu view(s) — the SIMULATOR is mono, so this "
+               "check is device-only", cp_drawable_get_view_count(drawable));
+        return;
+    }
+    simd_float4x4 a = cp_view_get_transform(cp_drawable_get_view(drawable, 0));
+    simd_float4x4 b = cp_view_get_transform(cp_drawable_get_view(drawable, 1));
+    simd_float3 d = b.columns[3].xyz - a.columns[3].xyz;
+    NSLog(@"[vrspike] IPD CHECK: eye1-eye0 = (%.4f, %.4f, %.4f) m  |len|=%.4f m "
+           "(expect ~0.063 along X)", (double)d.x, (double)d.y, (double)d.z,
+          (double)simd_length(d));
+}
+
+void sm64_vr_spike_run(void *layer_renderer_ptr, int variant) {
+    cp_layer_renderer_t layer_renderer = (__bridge cp_layer_renderer_t)layer_renderer_ptr;
+    sm64_vr_spike_stop = 0;
+    sm64_vr_spike_running = 1;
+
+    NSLog(@"[vrspike] loop started (variant=%d)", variant);
+
+    id<MTLCommandQueue> queue = nil;
+    NSString *lastContract = nil;
+    int frames = 0;
+    int styleStage = 0; // variant 2's live-switch state machine
+
+    // R0.2: world mode, ON unless explicitly disabled. Default-on because the
+    // DEVICE has no env channel — the headset run is the one that matters, and
+    // it must show the world. SM64_VR_WORLD=0 gets R0.1's clear-only style probe
+    // back on the simulator.
+    {
+        const char *w = getenv("SM64_VR_WORLD");
+        sVrWorld = (w && *w == '0') ? 0 : 1;
+    }
+    sVrValid = 0;
+    sVrEyeCopy[0] = sVrEyeCopy[1] = nil;
+    sVrLastGen = sm64_metal_get_3d_pair_gen(); // wait for a pair rendered THIS session
+    bool frozenSet = false;
+    simd_float4x4 frozenHead = matrix_identity_float4x4;
+    NSLog(@"[vrspike] world mode = %d", sVrWorld);
+
+    ar_world_tracking_configuration_t wtc = ar_world_tracking_configuration_create();
+    ar_world_tracking_provider_t wtp = ar_world_tracking_provider_create(wtc);
+    ar_session_t arSession = ar_session_create();
+    ar_data_providers_t providers = ar_data_providers_create_with_data_providers(wtp, NULL);
+    ar_session_run(arSession, providers);
+
+    int running = 1;
+    while (running) {
+        if (sm64_vr_spike_stop) {
+            NSLog(@"[vrspike] stop requested, exiting (frames=%d)", frames);
+            running = 0;
+            continue;
+        }
+        switch (cp_layer_renderer_get_state(layer_renderer)) {
+            case cp_layer_renderer_state_paused:
+                cp_layer_renderer_wait_until_running(layer_renderer);
+                continue;
+            case cp_layer_renderer_state_invalidated:
+                NSLog(@"[vrspike] layer INVALIDATED, exiting (frames=%d)", frames);
+                running = 0;
+                continue;
+            case cp_layer_renderer_state_running:
+            default:
+                break;
+        }
+
+        @autoreleasepool {
+            cp_frame_t frame = cp_layer_renderer_query_next_frame(layer_renderer);
+            if (frame == NULL) { continue; }
+
+            cp_frame_timing_t timing = cp_frame_predict_timing(frame);
+            cp_frame_start_update(frame);
+            cp_frame_end_update(frame);
+            cp_time_wait_until(cp_frame_timing_get_optimal_input_time(timing));
+            // Release the engine's next paced frame here, exactly as the 3D loop
+            // does. WITHOUT this the engine's wait in
+            // produce_interpolation_frames_and_delay() times out at 50 ms and it
+            // renders at ~20 Hz into a 90 Hz compositor — stale eye pairs, which
+            // is its own source of "doubled" on anything that moves.
+            sm64_3d_pace_signal_now();
+            cp_frame_start_submission(frame);
+
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+            cp_drawable_t drawable = cp_frame_query_drawable(frame);
+#pragma clang diagnostic pop
+            if (drawable == NULL) {
+                cp_frame_end_submission(frame);
+                continue;
+            }
+
+            if (queue == nil) {
+                id<MTLTexture> t0 = cp_drawable_get_color_texture(drawable, 0);
+                queue = [t0.device newCommandQueue];
+                sm64_vr_log_ipd(drawable);
+                if (sVrWorld) {
+                    sm64_vr_build_pipeline(t0.device, t0.pixelFormat,
+                                           cp_drawable_get_depth_texture(drawable, 0).pixelFormat);
+                }
+            }
+
+            // Contract dump: first frame and every change. The whole spike.
+            NSString *contract = sm64_vr_contract_string(layer_renderer, drawable);
+            if (lastContract == nil || ![contract isEqualToString:lastContract]) {
+                NSLog(@"[vrspike] CONTRACT (variant=%d frame=%d): %@", variant, frames, contract);
+                lastContract = contract;
+            }
+
+            CFTimeInterval presTime = cp_time_to_cf_time_interval(
+                cp_frame_timing_get_presentation_time(cp_drawable_get_frame_timing(drawable)));
+            ar_device_anchor_t anchor = ar_device_anchor_create();
+            ar_device_anchor_query_status_t anchorStatus =
+                ar_world_tracking_provider_query_device_anchor_at_timestamp(wtp, presTime, anchor);
+            cp_drawable_set_device_anchor(drawable, anchor);
+
+            // R0.2: freeze the pose ONCE tracking has converged (ARKit's first
+            // frames answer success with a near-identity pose — the same trap
+            // that put the 3D panel on the floor), then compose EyeVP and hand
+            // it to the engine. Frozen, so nothing after this depends on pose
+            // plumbing.
+            if (sVrWorld && (!frozenSet || sVrRefreeze) && frames > 30 &&
+                anchorStatus == ar_device_anchor_query_status_success) {
+                sVrRefreeze = 0;
+                frozenHead = ar_device_anchor_get_origin_from_anchor_transform(anchor);
+                frozenSet = true;
+                NSLog(@"[vrspike] pose FROZEN at head (%.2f,%.2f,%.2f)",
+                      (double)frozenHead.columns[3].x, (double)frozenHead.columns[3].y,
+                      (double)frozenHead.columns[3].z);
+                sm64_vr_build_matrices(drawable, frozenHead, true);
+            } else if (sVrWorld && frozenSet) {
+                // Every frame: the pose stays frozen, but the TUNABLES are live,
+                // so dragging a slider moves the world while you look at it —
+                // the donor's whole "tuned by feel" workflow.
+                sm64_vr_build_matrices(drawable, frozenHead, false);
+            }
+
+            id<MTLCommandBuffer> cb = [queue commandBuffer];
+
+            // ATOMIC EYE PAIR (the trap this tree already paid for once — 3D
+            // batch 3 item 1b). The engine renders L then R sequentially, so
+            // sampling "whatever is latest" per eye can pair L from frame N with
+            // R from frame N-1: a per-eye TIME skew, which reads as doubling on
+            // everything that moves. Copy both eyes only when the pair
+            // generation has advanced, and otherwise re-show the pair we already
+            // have — the two eyes are then always the same instant.
+            if (sVrWorld) {
+                uint32_t gen = sm64_metal_get_3d_pair_gen();
+                if (gen != sVrLastGen) {
+                    sVrLastGen = gen;
+                    for (int e = 0; e < 2; e++) {
+                        id<MTLTexture> src =
+                            (__bridge id<MTLTexture>)sm64_metal_get_3d_eye_texture(e + 1);
+                        if (src == nil || src.device != queue.device) { continue; }
+                        if (sVrEyeCopy[e] == nil || sVrEyeCopy[e].width != src.width ||
+                            sVrEyeCopy[e].height != src.height ||
+                            sVrEyeCopy[e].pixelFormat != src.pixelFormat) {
+                            MTLTextureDescriptor *td = [MTLTextureDescriptor
+                                texture2DDescriptorWithPixelFormat:src.pixelFormat
+                                                             width:src.width
+                                                            height:src.height
+                                                         mipmapped:YES];
+                            td.usage = MTLTextureUsageShaderRead | MTLTextureUsageRenderTarget;
+                            td.storageMode = MTLStorageModePrivate;
+                            sVrEyeCopy[e] = [src.device newTextureWithDescriptor:td];
+                        }
+                        id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
+                        [blit copyFromTexture:src toTexture:sVrEyeCopy[e]];
+                        if (sVrEyeCopy[e].mipmapLevelCount > 1) {
+                            [blit generateMipmapsForTexture:sVrEyeCopy[e]];
+                        }
+                        [blit endEncoding];
+                    }
+                }
+            }
+
+            size_t views = cp_drawable_get_view_count(drawable);
+            for (size_t v = 0; v < views; v++) {
+                cp_view_t vw = cp_drawable_get_view(drawable, v);
+                cp_view_texture_map_t tm = cp_view_get_view_texture_map(vw);
+                size_t texIdx = cp_view_texture_map_get_texture_index(tm);
+                size_t slice = cp_view_texture_map_get_slice_index(tm);
+                MTLViewport vp = cp_view_texture_map_get_viewport(tm);
+
+                MTLRenderPassDescriptor *pass = [MTLRenderPassDescriptor renderPassDescriptor];
+                pass.colorAttachments[0].texture = cp_drawable_get_color_texture(drawable, texIdx);
+                pass.colorAttachments[0].slice = slice;
+                pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+                pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+                // PARTIAL ALPHA on purpose: in .mixed the room must show through
+                // this wash; in .full it must not. Distinct hue per eye so a
+                // mono/duplicated presentation is visible rather than assumed.
+                pass.colorAttachments[0].clearColor = sVrWorld
+                    ? MTLClearColorMake(0.0, 0.0, 0.0, 0.0)       // world: passthrough behind it
+                    : ((v == 0) ? MTLClearColorMake(0.10, 0.35, 0.90, 0.50)   // left: blue
+                                : MTLClearColorMake(0.90, 0.30, 0.10, 0.50)); // right: orange
+                size_t rmCount = cp_drawable_get_rasterization_rate_map_count(drawable);
+                if (rmCount > 0) {
+                    pass.rasterizationRateMap = cp_drawable_get_rasterization_rate_map(
+                        drawable, texIdx < rmCount ? texIdx : 0);
+                }
+                id<MTLTexture> depthTex = cp_drawable_get_depth_texture(drawable, texIdx);
+                if (depthTex) {
+                    pass.depthAttachment.texture = depthTex;
+                    pass.depthAttachment.slice = slice;
+                    pass.depthAttachment.loadAction = MTLLoadActionClear;
+                    pass.depthAttachment.storeAction = MTLStoreActionStore;
+                    pass.depthAttachment.clearDepth = 1.0;
+                }
+                id<MTLRenderCommandEncoder> enc = [cb renderCommandEncoderWithDescriptor:pass];
+                [enc setViewport:vp];
+
+                // R0.2: paint this eye's engine render over the whole slice.
+                if (sVrWorld && sVrValid && sVrPipeline) {
+                    id<MTLTexture> src = (v < 2) ? sVrEyeCopy[v] : sVrEyeCopy[0];
+                    if (src == nil) { src = sVrEyeCopy[0] ? sVrEyeCopy[0] : sVrEyeCopy[1]; }
+                    if (src != nil) {
+                        // Reverse-Z depth for the whole image at the diorama's
+                        // distance. The compositor takes ONLY reverse-Z here
+                        // (1 = near), which is exactly why the engine's own
+                        // projection had to stay forward-Z: the two conventions
+                        // meet at this line and nowhere else.
+                        simd_float2 dr = cp_drawable_get_depth_range(drawable);
+                        float znDrawable = (dr.y > 0.0001f) ? dr.y : 0.1f;
+                        float depth = znDrawable / (sVrDist + 1.0f);
+                        if (depth > 1.0f) { depth = 1.0f; }
+                        float srgbDecode =
+                            (src.pixelFormat == MTLPixelFormatBGRA8Unorm ||
+                             src.pixelFormat == MTLPixelFormatRGBA8Unorm) ? 1.0f : 0.0f;
+                        [enc setRenderPipelineState:sVrPipeline];
+                        [enc setDepthStencilState:sVrDepthState];
+                        [enc setVertexBytes:&depth length:sizeof(depth) atIndex:0];
+                        [enc setFragmentBytes:&srgbDecode length:sizeof(srgbDecode) atIndex:0];
+                        [enc setFragmentTexture:src atIndex:0];
+                        [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+                    }
+                }
+                [enc endEncoding];
+            }
+
+            cp_drawable_encode_present(drawable, cb);
+            [cb commit];
+            cp_frame_end_submission(frame);
+
+            frames++;
+            if (frames == 1 || frames == 10 || (frames % 300) == 0) {
+                NSLog(@"[vrspike] variant=%d frame=%d PRESENTED (survived encode_present)",
+                      variant, frames);
+            }
+
+            // Variant 2, clear-only probe: drive a LIVE style switch off this
+            // loop's own frame clock. ~90 Hz on device, ~60 on the sim, so the
+            // stages are a few seconds apart either way. If a switch changes the
+            // contract, the dump above prints it; if it aborts, the log simply
+            // stops here. In WORLD mode the ornament's Passthrough/Full button
+            // drives the same switch by hand instead — an automatic flip every
+            // few seconds is unreadable when there is a world to look at.
+            if (variant == 2 && !sVrWorld) {
+                if (styleStage == 0 && frames >= 240) {
+                    styleStage = 1;
+                    NSLog(@"[vrspike] LIVE SWITCH -> .full (frame %d)", frames);
+                    SM64_SetVRSpikeStyleFull(true);
+                } else if (styleStage == 1 && frames >= 540) {
+                    styleStage = 2;
+                    NSLog(@"[vrspike] LIVE SWITCH -> .mixed (frame %d)", frames);
+                    SM64_SetVRSpikeStyleFull(false);
+                } else if (styleStage == 2 && frames >= 840) {
+                    styleStage = 3;
+                    NSLog(@"[vrspike] LIVE SWITCH -> .full again (frame %d)", frames);
+                    SM64_SetVRSpikeStyleFull(true);
+                }
+            }
+        } // @autoreleasepool
+    }
+
+    // Hand the projection back to the panel path BEFORE the thread dies, or the
+    // engine keeps composing a VR matrix into a frame nobody is showing in VR.
+    sVrValid = 0;
+    sVrPipeline = nil;
+    sVrDepthState = nil;
+    sVrEyeCopy[0] = sVrEyeCopy[1] = nil;
+    NSLog(@"[vrspike] loop finished (variant=%d frames=%d)", variant, frames);
+    sm64_vr_spike_running = 0;
+}
+
+#endif // SM64_VISION_3D

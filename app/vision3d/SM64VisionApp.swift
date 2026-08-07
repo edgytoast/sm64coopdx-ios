@@ -20,6 +20,24 @@ final class SM64AppModel: ObservableObject {
     static let shared = SM64AppModel()
     @Published var immersive = false
     @Published var showSettings = false
+    // R0 SPIKE (throwaway): which VR spike space is open — 0 none, 1 mixed-only,
+    // 2 mixed+full switchable, 3 full-only. See sm64_vr_spike.h.
+    @Published var vrSpike: Int = 0
+    // R0 SPIKE: the live style for variant 2's switchable space.
+    @Published var vrSpikeFull: Bool = false
+}
+
+// R0 SPIKE ids, indexed by variant so the C side only ever passes an int.
+private let sm64VRSpikeIDs = ["", "SM64-VR-MIXED", "SM64-VR-SWITCH", "SM64-VR-FULL"]
+
+@_cdecl("SM64_SetVRSpikeMode")
+func SM64_SetVRSpikeMode(_ variant: Int32) {
+    DispatchQueue.main.async { SM64AppModel.shared.vrSpike = Int(variant) }
+}
+
+@_cdecl("SM64_SetVRSpikeStyleFull")
+func SM64_SetVRSpikeStyleFull(_ full: Bool) {
+    DispatchQueue.main.async { SM64AppModel.shared.vrSpikeFull = full }
 }
 
 // Called from sm64_vision_host.m to flip the SwiftUI state that actually
@@ -146,8 +164,25 @@ struct SM64RootView: View {
             // and overlaps game content. .padding(.top) adds the clear gap.
             .ornament(attachmentAnchor: .scene(.bottom), contentAlignment: .top) {
                 HStack(spacing: 16) {
-                    Button(model.immersive ? "Exit" : "3D") {
-                        sm64_3d_enter(!model.immersive)
+                    if model.vrSpike == 0 {
+                        Button(model.immersive ? "Exit" : "3D") {
+                            sm64_3d_enter(!model.immersive)
+                        }
+                    }
+                    // R0 SPIKE (throwaway): the device has no env channel, so the
+                    // spike needs a control surface. "VR" opens the switchable
+                    // (.mixed + .full) space with the frozen-pose world; while it
+                    // is open the second button flips the style LIVE, which is the
+                    // A7 question a headset has to answer by eye.
+                    if !model.immersive {
+                        Button(model.vrSpike == 0 ? "VR" : "Exit VR") {
+                            sm64_vr_spike_enter(model.vrSpike == 0 ? 2 : 0)
+                        }
+                    }
+                    if model.vrSpike != 0 {
+                        Button(model.vrSpikeFull ? "Passthrough" : "Full VR") {
+                            SM64_SetVRSpikeStyleFull(!model.vrSpikeFull)
+                        }
                     }
                     Button { model.showSettings = true } label: {
                         Image(systemName: "gearshape.fill")
@@ -190,6 +225,32 @@ struct SM64RootView: View {
                 }
                 .frame(minWidth: 900)
             }
+            // R0 SPIKE (throwaway): open/dismiss whichever spike space the C side
+            // asked for. Deliberately a SEPARATE onChange from the 3D one — the
+            // whole point is that the two spaces' configurations stay independent
+            // (the recorded trap is a style set changing the OTHER space's
+            // drawable contract).
+            .onChange(of: model.vrSpike) { old, v in
+                NSLog("[vrspike] Swift: vrSpike onChange \(old) -> \(v)")
+                Task {
+                    if old != 0 {
+                        await dismissImmersiveSpace()
+                        NSLog("[vrspike] Swift: dismissed spike space")
+                    }
+                    if v > 0 && v < sm64VRSpikeIDs.count {
+                        let id = sm64VRSpikeIDs[v]
+                        let r = await openImmersiveSpace(id: id)
+                        NSLog("[vrspike] Swift: openImmersiveSpace(\(id)) -> \(String(describing: r))")
+                        if case .error = r {
+                            sm64_vr_spike_enter(0) // roll the engine back out of offscreen mode
+                        } else {
+                            sm64_3d_park_window()
+                        }
+                    } else {
+                        sm64_3d_exit_finalize()
+                    }
+                }
+            }
             .onChange(of: model.immersive) { _, on in
                 NSLog("[sm64vp] Swift: immersive onChange -> \(on)")
                 Task {
@@ -221,8 +282,22 @@ struct SM64RootView: View {
     }
 }
 
+// R0 SPIKE: spawn the spike loop on its own thread, same rule as the 3D loop.
+private func sm64SpawnVRSpike(_ layerRenderer: LayerRenderer, _ variant: Int32) {
+    NSLog("[vrspike] Swift: CompositorLayer ready (variant=\(variant)) — spawning render thread")
+    let t = Thread {
+        sm64_vr_spike_run(Unmanaged.passUnretained(layerRenderer).toOpaque(), variant)
+    }
+    t.name = "SM64-VR-Spike"
+    t.stackSize = 2 << 20
+    t.start()
+}
+
 @main
 struct SM64VisionApp: App {
+    // R0 SPIKE: the App observes the model so variant 2's style binding is live.
+    @StateObject private var model = SM64AppModel.shared
+
     var body: some Scene {
         WindowGroup {
             SM64RootView()
@@ -245,5 +320,41 @@ struct SM64VisionApp: App {
         // __BUG_IN_CLIENT__. Crown-dimming would need real portal support; the
         // "Surroundings Dimming" slider is our in-app replacement.
         .immersionStyle(selection: .constant(.mixed), in: .mixed)
+
+        // -------------------------------------------------------------------
+        // R0 SPIKE (throwaway — VR-CHARTER §5 R0.1 / A7). Three separate spaces,
+        // one per style SET, because a set is fixed at scene-declaration time.
+        // Opening them one at a time answers "which survive encode_present" and
+        // "does the drawable contract differ between styles"; variant 2 also
+        // answers "does a LIVE switch survive".
+        //
+        // The existing SM64-3D space above is NOT touched — that independence is
+        // exactly what A7 path (a) needs to be true.
+        // -------------------------------------------------------------------
+        ImmersiveSpace(id: "SM64-VR-MIXED") {
+            CompositorLayer(configuration: SM64CompositorConfiguration()) { lr in
+                sm64SpawnVRSpike(lr, 1)
+            }
+        }
+        .immersionStyle(selection: .constant(.mixed), in: .mixed)
+
+        ImmersiveSpace(id: "SM64-VR-SWITCH") {
+            CompositorLayer(configuration: SM64CompositorConfiguration()) { lr in
+                sm64SpawnVRSpike(lr, 2)
+            }
+        }
+        // The shape of the recorded trap: a style SET with more than one member,
+        // switched live. A computed Binding rather than @State so the loop can
+        // drive it from C through the published flag.
+        .immersionStyle(selection: Binding<ImmersionStyle>(
+            get: { model.vrSpikeFull ? .full : .mixed },
+            set: { _ in }), in: .mixed, .full)
+
+        ImmersiveSpace(id: "SM64-VR-FULL") {
+            CompositorLayer(configuration: SM64CompositorConfiguration()) { lr in
+                sm64SpawnVRSpike(lr, 3)
+            }
+        }
+        .immersionStyle(selection: .constant(.full), in: .full)
     }
 }

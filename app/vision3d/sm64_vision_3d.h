@@ -152,6 +152,8 @@ float sm64_3d_auto_convergence(void);
 // running) so the caller falls back to overlay 0012's sleep limiter. Called from
 // pc_main.c's produce_interpolation_frames_and_delay().
 bool sm64_3d_wait_for_compositor_frame(void);
+// R0 SPIKE (throwaway): lets the VR probe loop drive the same phase-lock.
+void sm64_3d_pace_signal_now(void);
 // Surroundings dimming, 0..1 on the UI scale. Mapped through a perceptual curve
 // internally (linear "doesn't get dark until 80%" — guide §2.7).
 void sm64_3d_set_dim(float dim);

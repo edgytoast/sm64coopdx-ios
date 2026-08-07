@@ -66,6 +66,11 @@ void sm64_vr_spike_set_tunables(float scale, float dist, float height, float ste
 // Re-freeze the head pose on the next tracked frame ("Recenter VR World").
 void sm64_vr_spike_recenter(void);
 
+// The doubling diagnostic ladder — see the .m. swapEyes gives each view the
+// other eye's finished image; forceMono gives both views the LEFT one. Neither
+// touches the matrices.
+void sm64_vr_spike_set_flags(int swapEyes, int forceMono);
+
 #ifdef __cplusplus
 }
 #endif

@@ -155,14 +155,23 @@ static __weak SM64SettingsVC *g_settingsVC = nil;
         mkrow(@"Units", @"units", SM64_ROW_SEG, 0, 1, SM64_DEF_UNITS),
         mkrow(@"Recenter Screen", @"recenter", SM64_ROW_BUTTON, 0, 0, 0),
     ], @[
-        // R0 SPIKE (throwaway). Stereo Strength FIRST because it is the one that
-        // fixes doubling: the donor calls 1.0 "true IPD" and lower "gentler
-        // stereo / less cross-eye", and ships 0.50 on every preset.
+        // R0 SPIKE (throwaway). Stereo Strength is a COMFORT lever, not a fix for
+        // doubling — 2026-08-07's device round settled that (0% doubled WORSE,
+        // which is impossible when each eye's frustum matches its rotation). It
+        // is still the fastest diagnostic in the sheet: at 0% the image must go
+        // FLAT BUT SINGLE, and if it does not, the frustum/rotation pairing is
+        // still wrong and nothing downstream is worth tuning.
         mkrow(@"Stereo Strength", @"vrStereo", SM64_ROW_SLIDER, 0.0, 1.0, SM64_DEF_VRSTEREO),
         mkrow(@"World Scale", @"vrScale", SM64_ROW_SLIDER, 300.0, 6000.0, SM64_DEF_VRSCALE),
         mkrow(@"World Distance", @"vrDist", SM64_ROW_SLIDER, 0.3, 3.0, SM64_DEF_VRDIST),
         mkrow(@"World Height", @"vrHeight", SM64_ROW_SLIDER, -1.5, 0.5, SM64_DEF_VRHEIGHT),
         mkrow(@"Recenter VR World", @"vrRecenter", SM64_ROW_BUTTON, 0, 0, 0),
+        // The doubling ladder (see sm64_vr_spike.m). Test A: Force Mono — if it
+        // STILL doubles with both eyes showing identical pixels, the cause is not
+        // stereo pairing. Test B: Swap Eyes — if THAT fuses, view 0 is not the
+        // left eye. Both default off.
+        mkrow(@"Test A: Force Mono", @"vrMono", SM64_ROW_SWITCH, 0, 1, 0),
+        mkrow(@"Test B: Swap Eyes", @"vrSwap", SM64_ROW_SWITCH, 0, 1, 0),
     ] ];
 }
 

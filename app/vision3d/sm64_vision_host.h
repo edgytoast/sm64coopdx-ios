@@ -54,7 +54,12 @@
 #define SM64_DEF_VRSCALE  1376.0f // game units per metre (bigger = smaller world)
 #define SM64_DEF_VRDIST   0.60f   // metres in front of the frozen head (donor ships 0.25; Austin's device report was "very close up to my face", so the FIRST look starts further out and the slider goes back down to 0.30)
 #define SM64_DEF_VRHEIGHT (-0.35f)// metres relative to eye level
-#define SM64_DEF_VRSTEREO 0.50f   // eye offset as a fraction of the true IPD
+#define SM64_DEF_VRSTEREO 1.00f   // eye offset as a fraction of the true IPD. 1.0 is the
+                                  // GEOMETRICALLY TRUE setting and is now the default: with each
+                                  // eye's canted frustum intact, anything below 1.0 is just a
+                                  // smaller-IPD person (less parallax, still fused), and 0.0 must
+                                  // give a FLAT BUT SINGLE image. The donor's 0.50 is a comfort
+                                  // choice on a miniature world, not a fix for doubling.
 
 // Boots the SDL/coopdx engine under the SwiftUI app entry and owns the 2D<->3D
 // transition sequencing. Hosted in the SwiftUI WindowGroup (see SM64VisionApp.swift).

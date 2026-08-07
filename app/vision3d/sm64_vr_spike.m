@@ -46,12 +46,13 @@ volatile int sm64_vr_spike_variant = 0;
 // 2026-08-07: "VERY close up to my face and doubled, almost like I'm looking
 // crosseyed"):
 //
-//   STEREO SCALE. The donor scales each eye's offset from the head centre and
-//   its own comment names this exact failure: "1.0 = true IPD, lower = gentler
-//   stereo / LESS CROSS-EYE" (vr.c:367). Every donor preset ships 0.50. The
-//   first spike build rendered at 1.0 — a full physical IPD on a world 25 cm
-//   away is disparity no one can fuse. This is NOT a sign flip by feel (charter
-//   §10); it is a documented lever ported from a build that demonstrably fuses.
+//   STEREO SCALE. The donor scales each eye's offset from the head centre
+//   ("1.0 = true IPD, lower = gentler stereo / less cross-eye", vr.c:367) and
+//   ships 0.50. Kept as a comfort slider — but 2026-08-07's device round proved
+//   it is NOT what was doubling the view: at 0% the doubles were FURTHER apart,
+//   which cannot happen if each eye's rotation and frustum agree (0% must give
+//   two identical images). The real cause was the rebuilt frustum; see
+//   sm64_vr_forward_z_projection. Default is 1.0, the true geometry.
 //
 //   STANDOFF. The donor keeps the anchor at least sClipMargin = 0.30 m from the
 //   head (vr.c:288/519, the anti-clip's resting behaviour). At 0.25 m the world
@@ -62,8 +63,30 @@ volatile int sm64_vr_spike_variant = 0;
 static float sVrScale  = 1376.0f; // game units per metre (bigger = smaller world)
 static float sVrDist   = 0.60f;   // metres in front of the frozen head (donor 0.25, pushed out after the device report)
 static float sVrHeight = -0.35f;  // metres relative to eye level
-static float sVrStereo = 0.50f;   // eye offset as a fraction of the true IPD
+static float sVrStereo = 1.00f;   // eye offset as a fraction of the true IPD (1.0 = geometrically true)
 static const float kVrClipMargin = 0.30f; // donor sClipMargin: minimum anchor standoff
+
+// ---------------------------------------------------------------------------
+// The diagnostic ladder for the doubling (2026-08-07). Each rung has a
+// PREDICTED signature, so one headset round answers which hypothesis is live
+// instead of iterating on guesses:
+//
+//   FORCE MONO — feed BOTH drawable views the LEFT eye's image. The two views
+//     then carry identical pixels, so any doubling that SURVIVES is not stereo
+//     pairing at all (it would be inside one eye's image, or the compositor's
+//     own presentation) and every stereo hypothesis below is dead.
+//   SWAP EYES — give each view the other eye's image. If this FUSES, then view 0
+//     is not the left eye and the whole pairing is simply inverted.
+//
+// Both default OFF and neither changes the matrices — they only re-route which
+// finished texture a view samples, so nothing else moves underneath the test.
+static int sVrSwapEyes = 0;
+static int sVrForceMono = 0;
+
+void sm64_vr_spike_set_flags(int swapEyes, int forceMono) {
+    sVrSwapEyes = swapEyes ? 1 : 0;
+    sVrForceMono = forceMono ? 1 : 0;
+}
 
 void sm64_vr_spike_set_tunables(float scale, float dist, float height, float stereo) {
     if (scale  >= 100.0f && scale <= 20000.0f) { sVrScale  = scale;  }
@@ -92,35 +115,72 @@ const float *sm64_vr_eye_viewproj(int eye) {
 
 int sm64_vr_hide_background(void) { return sVrWorld; }
 
-// Forward-Z projection from the drawable's own per-eye tangents.
+// The compositor's own projection with ONLY its depth row replaced.
 //
-// NOT cp_drawable_compute_projection used directly, and this is an R0 FINDING
-// rather than a preference: the compositor only supports REVERSE-Z for the
-// drawable's depth (drawable.h: "It only supports reverse-Z depth ... 1 for
-// near 0 for far"), while the engine renders forward-Z (clear 1.0, less-equal)
-// on every other target it owns. Handing the engine a reverse-Z projection
-// inverts its depth test and sorts the world back-to-front. So the ASYMMETRIC
-// FRUSTUM is taken from the compositor's matrix — recovered exactly, no
-// hand-rolled FOV — and only the depth mapping is rebuilt forward.
+// WHY THE ENGINE CANNOT TAKE THE MATRIX UNCHANGED (R0 finding): the compositor
+// supports REVERSE-Z only for the drawable's depth (drawable.h: "It only
+// supports reverse-Z depth ... 1 for near 0 for far"), while the engine renders
+// forward-Z (clear 1.0, less-equal) on every target it owns. A reverse-Z
+// projection inverts its depth test and sorts the world back to front.
 //
-//   m00 = 2/(tR-tL), m20 = (tR+tL)/(tR-tL)  =>  tR = (m20+1)/m00, tL = (m20-1)/m00
-static simd_float4x4 sm64_vr_forward_z_projection(simd_float4x4 cpProj, float zn, float zf) {
-    float m00 = cpProj.columns[0].x, m11 = cpProj.columns[1].y;
-    float m20 = cpProj.columns[2].x, m21 = cpProj.columns[2].y;
-    if (fabsf(m00) < 1e-6f) { m00 = 1.0f; }
-    if (fabsf(m11) < 1e-6f) { m11 = 1.0f; }
-    float tR = (m20 + 1.0f) / m00, tL = (m20 - 1.0f) / m00;
-    float tU = (m21 + 1.0f) / m11, tD = (m21 - 1.0f) / m11;
-
-    simd_float4x4 P = (simd_float4x4){{ {0,0,0,0}, {0,0,0,0}, {0,0,0,0}, {0,0,0,0} }};
-    P.columns[0].x = 2.0f / (tR - tL);
-    P.columns[1].y = 2.0f / (tU - tD);
-    P.columns[2].x = (tR + tL) / (tR - tL);
-    P.columns[2].y = (tU + tD) / (tU - tD);
-    P.columns[2].z = zf / (zn - zf);   // -zn -> 0, -zf -> 1 (Metal's 0..1 clip z)
-    P.columns[2].w = -1.0f;
-    P.columns[3].z = zn * zf / (zn - zf);
+// WHY IT IS NO LONGER REBUILT FROM RECOVERED TANGENTS, which is the fix for
+// Austin's 2026-08-07 device report ("0% IPD, the doubling is further apart;
+// 100%, the two Mario doubles get slightly closer"). That reading is the
+// signature of a per-eye CONSTANT angular offset: with each eye's rotation and
+// frustum correctly paired, 0% separation must give two IDENTICAL images — flat,
+// but fused — and only worse-than-that if the frustum does not match the
+// rotation. Vision Pro's displays are CANTED, so each eye's frustum is strongly
+// asymmetric to match; decomposing that matrix into tangents and rebuilding it
+// puts one silent assumption (WHERE Apple stores the off-centre terms, and with
+// which sign) between us and a correct frustum, and getting it wrong
+// symmetrises the frusta. The donor paid for exactly this once, on the same
+// class of hardware (vr.c:561-568): "Forcing it symmetric here pointed both
+// eyes' frustum centers inward -> the images converge -> CROSS-EYED (double
+// vision)". It is invisible on our simulator, which is mono and symmetric.
+//
+// So: keep Apple's matrix verbatim — x row, y row, w row, asymmetry, whatever
+// convention it is in — and overwrite ONLY the z row. Nothing about the frustum
+// can then be lost in translation, because it is never translated.
+static simd_float4x4 sm64_vr_forward_z_projection(simd_float4x4 P, float zn, float zf) {
+    // clip.w = wz * z. -1 is the -Z-forward convention we expect; read it rather
+    // than assume it, because the whole point here is to stop assuming.
+    float wz = P.columns[2].w;
+    float A, B;
+    if (wz < 0.0f) {          // w = -z: map z=-zn -> 0, z=-zf -> 1
+        A = zf / (zn - zf);
+        B = zn * zf / (zn - zf);
+    } else {                  // w = +z: the mirrored convention
+        A = zf / (zf - zn);
+        B = -zn * zf / (zf - zn);
+    }
+    P.columns[0].z = 0.0f;
+    P.columns[1].z = 0.0f;
+    P.columns[2].z = A;
+    P.columns[3].z = B;
     return P;
+}
+
+// One-time dump of what the compositor actually handed us, per eye, so the
+// asymmetry is a READ NUMBER and not an inference. tR+tL far from zero means a
+// canted eye; equal-and-opposite tangents on both eyes would mean symmetric
+// frusta, and would move the suspicion elsewhere.
+static void sm64_vr_log_projection(int eye, simd_float4x4 cp, simd_float4x4 fixed) {
+    float m00 = cp.columns[0].x, m11 = cp.columns[1].y;
+    float ox = cp.columns[2].x, oy = cp.columns[2].y;
+    float tR = (fabsf(m00) > 1e-6f) ? (ox + 1.0f) / m00 : 0.0f;
+    float tL = (fabsf(m00) > 1e-6f) ? (ox - 1.0f) / m00 : 0.0f;
+    float tU = (fabsf(m11) > 1e-6f) ? (oy + 1.0f) / m11 : 0.0f;
+    float tD = (fabsf(m11) > 1e-6f) ? (oy - 1.0f) / m11 : 0.0f;
+    NSLog(@"[vrspike] PROJ eye=%d cp: c0=(%.4f,%.4f,%.4f,%.4f) c1=(%.4f,%.4f,%.4f,%.4f) "
+           "c2=(%.4f,%.4f,%.4f,%.4f) c3=(%.4f,%.4f,%.4f,%.4f)",
+          eye,
+          cp.columns[0].x, cp.columns[0].y, cp.columns[0].z, cp.columns[0].w,
+          cp.columns[1].x, cp.columns[1].y, cp.columns[1].z, cp.columns[1].w,
+          cp.columns[2].x, cp.columns[2].y, cp.columns[2].z, cp.columns[2].w,
+          cp.columns[3].x, cp.columns[3].y, cp.columns[3].z, cp.columns[3].w);
+    NSLog(@"[vrspike] PROJ eye=%d tangents R=%.4f L=%.4f U=%.4f D=%.4f | offCentre x=%.4f y=%.4f "
+           "(0 = symmetric; Vision Pro's canted eyes should NOT be 0) | fixed c2.z=%.4f c3.z=%.4f",
+          eye, tR, tL, tU, tD, tR + tL, tU + tD, fixed.columns[2].z, fixed.columns[3].z);
 }
 
 // Place the game's camera space in the room: camera origin sVrDist ahead of the
@@ -201,6 +261,7 @@ static void sm64_vr_build_matrices(cp_drawable_t drawable, simd_float4x4 frozenH
         simd_float4x4 P = sm64_vr_forward_z_projection(cpProj, zn, zf);
         simd_float4x4 M = simd_mul(P, simd_mul(eyeFromOrigin, A));
         memcpy(&sVrEyeVP[v][0][0], &M, sizeof(sVrEyeVP[v])); // simd column-major == fast3d transpose
+        if (logIt) { sm64_vr_log_projection((int)v, cpProj, P); }
         if (logIt) {
             NSLog(@"[vrspike] EyeVP[%zu] view %zu: eye(%.4f,%.4f,%.4f) -> scaled(%.4f,%.4f,%.4f)",
                   v, src, (double)eyePos.x, (double)eyePos.y, (double)eyePos.z,
@@ -539,7 +600,11 @@ void sm64_vr_spike_run(void *layer_renderer_ptr, int variant) {
 
                 // R0.2: paint this eye's engine render over the whole slice.
                 if (sVrWorld && sVrValid && sVrPipeline) {
-                    id<MTLTexture> src = (v < 2) ? sVrEyeCopy[v] : sVrEyeCopy[0];
+                    // The diagnostic ladder: which finished eye this view shows.
+                    size_t pick = (v < 2) ? v : 0;
+                    if (sVrSwapEyes) { pick = 1 - pick; }
+                    if (sVrForceMono) { pick = 0; }
+                    id<MTLTexture> src = sVrEyeCopy[pick];
                     if (src == nil) { src = sVrEyeCopy[0] ? sVrEyeCopy[0] : sVrEyeCopy[1]; }
                     if (src != nil) {
                         // Reverse-Z depth for the whole image at the diorama's

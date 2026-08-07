@@ -172,6 +172,7 @@ static __weak SM64SettingsVC *g_settingsVC = nil;
         // left eye. Both default off.
         mkrow(@"Test A: Force Mono", @"vrMono", SM64_ROW_SWITCH, 0, 1, 0),
         mkrow(@"Test B: Swap Eyes", @"vrSwap", SM64_ROW_SWITCH, 0, 1, 0),
+        mkrow(@"Dump Eye Images", @"vrDump", SM64_ROW_BUTTON, 0, 0, 0),
     ] ];
 }
 
@@ -303,6 +304,9 @@ static __weak SM64SettingsVC *g_settingsVC = nil;
     } else if ([r.key isEqualToString:@"vrRecenter"]) {
         sm64_vr_spike_recenter();
         NSLog(@"[vrspike] settings: VR world recenter requested");
+    } else if ([r.key isEqualToString:@"vrDump"]) {
+        sm64_vr_spike_dump_eyes();
+        NSLog(@"[vrspike] settings: eye dump requested");
     }
 }
 

@@ -71,6 +71,11 @@ void sm64_vr_spike_recenter(void);
 // touches the matrices.
 void sm64_vr_spike_set_flags(int swapEyes, int forceMono);
 
+// Write both ENGINE eye textures to Documents as vr-eye-L/R.png. Also fires once
+// automatically a few seconds into each VR entry, so the artifact exists without
+// anyone having to remember to press anything.
+void sm64_vr_spike_dump_eyes(void);
+
 #ifdef __cplusplus
 }
 #endif

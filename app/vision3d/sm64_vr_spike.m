@@ -17,6 +17,8 @@
 #import <ARKit/ARKit.h>
 #import <simd/simd.h>
 #import <Foundation/Foundation.h>
+#import <ImageIO/ImageIO.h>
+#import <CoreGraphics/CoreGraphics.h>
 
 volatile int sm64_vr_spike_stop = 0;
 volatile int sm64_vr_spike_running = 0;
@@ -160,6 +162,72 @@ static simd_float4x4 sm64_vr_forward_z_projection(simd_float4x4 P, float zn, flo
     return P;
 }
 
+// ---------------------------------------------------------------------------
+// EYE DUMP — the donor's instrument ("the one that settled the carpet argument
+// on PC", QUEST_PORT_NOTES). Writes both ENGINE eye textures to Documents as
+// PNGs, which `devicectl device copy from` can pull off the headset.
+//
+// It answers the one question reasoning cannot: do the two rendered images
+// actually carry the ~36° cant the device's frusta ask for? If they do, the
+// engine honoured the asymmetric projections and the fault is downstream; if
+// they look like the same framing shifted slightly, the asymmetry is being lost
+// inside the engine, and THAT is a permanent per-eye displacement no stereo
+// setting can rescue — exactly what Austin is seeing.
+static volatile int sVrDumpRequest = 0;
+void sm64_vr_spike_dump_eyes(void) { sVrDumpRequest = 1; }
+
+static void sm64_vr_write_png(id<MTLTexture> src, id<MTLCommandQueue> queue, NSString *name) {
+    if (src == nil) { return; }
+    MTLTextureDescriptor *td =
+        [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:src.pixelFormat
+                                                           width:src.width
+                                                          height:src.height
+                                                       mipmapped:NO];
+    td.usage = MTLTextureUsageShaderRead;
+    td.storageMode = MTLStorageModeShared;   // readable by the CPU
+    id<MTLTexture> host = [src.device newTextureWithDescriptor:td];
+    if (host == nil) { return; }
+    id<MTLCommandBuffer> cb = [queue commandBuffer];
+    id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
+    [blit copyFromTexture:src sourceSlice:0 sourceLevel:0
+             sourceOrigin:MTLOriginMake(0, 0, 0)
+               sourceSize:MTLSizeMake(src.width, src.height, 1)
+                toTexture:host destinationSlice:0 destinationLevel:0
+        destinationOrigin:MTLOriginMake(0, 0, 0)];
+    [blit endEncoding];
+    [cb commit];
+    [cb waitUntilCompleted];
+
+    size_t w = host.width, h = host.height, stride = w * 4;
+    void *bytes = malloc(stride * h);
+    if (!bytes) { return; }
+    [host getBytes:bytes bytesPerRow:stride fromRegion:MTLRegionMake2D(0, 0, w, h) mipmapLevel:0];
+
+    CGColorSpaceRef cs = CGColorSpaceCreateDeviceRGB();
+    // The engine renders BGRA8Unorm; tell CoreGraphics so the dump is not
+    // channel-swapped (a red Mario would be a distraction, not a finding).
+    CGBitmapInfo bi = kCGBitmapByteOrder32Little | kCGImageAlphaNoneSkipFirst;
+    CGContextRef ctx = CGBitmapContextCreate(bytes, w, h, 8, stride, cs, bi);
+    CGImageRef img = ctx ? CGBitmapContextCreateImage(ctx) : NULL;
+    if (img) {
+        NSString *docs = [NSSearchPathForDirectoriesInDomains(
+            NSDocumentDirectory, NSUserDomainMask, YES) firstObject];
+        NSURL *url = [NSURL fileURLWithPath:[docs stringByAppendingPathComponent:name]];
+        CGImageDestinationRef dst =
+            CGImageDestinationCreateWithURL((__bridge CFURLRef)url, (CFStringRef)@"public.png", 1, NULL);
+        if (dst) {
+            CGImageDestinationAddImage(dst, img, NULL);
+            CGImageDestinationFinalize(dst);
+            CFRelease(dst);
+            NSLog(@"[vrspike] eye dump wrote %@ (%zux%zu)", name, w, h);
+        }
+        CGImageRelease(img);
+    }
+    if (ctx) { CGContextRelease(ctx); }
+    CGColorSpaceRelease(cs);
+    free(bytes);
+}
+
 // One-time dump of what the compositor actually handed us, per eye, so the
 // asymmetry is a READ NUMBER and not an inference. tR+tL far from zero means a
 // canted eye; equal-and-opposite tangents on both eyes would mean symmetric
@@ -261,7 +329,19 @@ static void sm64_vr_build_matrices(cp_drawable_t drawable, simd_float4x4 frozenH
         simd_float4x4 P = sm64_vr_forward_z_projection(cpProj, zn, zf);
         simd_float4x4 M = simd_mul(P, simd_mul(eyeFromOrigin, A));
         memcpy(&sVrEyeVP[v][0][0], &M, sizeof(sVrEyeVP[v])); // simd column-major == fast3d transpose
-        if (logIt) { sm64_vr_log_projection((int)v, cpProj, P); }
+        if (logIt) {
+            sm64_vr_log_projection((int)v, cpProj, P);
+            // The PUBLISHED matrix, all 16 values, in the row-vector form the
+            // engine consumes. If the cant is present here but absent from the
+            // rendered image, the asymmetry is being lost inside the engine.
+            NSLog(@"[vrspike] EyeVP[%zu] fast3d rows: "
+                   "[%.5f %.5f %.5f %.5f][%.5f %.5f %.5f %.5f]"
+                   "[%.5f %.5f %.5f %.5f][%.5f %.5f %.5f %.5f]", v,
+                  sVrEyeVP[v][0][0], sVrEyeVP[v][0][1], sVrEyeVP[v][0][2], sVrEyeVP[v][0][3],
+                  sVrEyeVP[v][1][0], sVrEyeVP[v][1][1], sVrEyeVP[v][1][2], sVrEyeVP[v][1][3],
+                  sVrEyeVP[v][2][0], sVrEyeVP[v][2][1], sVrEyeVP[v][2][2], sVrEyeVP[v][2][3],
+                  sVrEyeVP[v][3][0], sVrEyeVP[v][3][1], sVrEyeVP[v][3][2], sVrEyeVP[v][3][3]);
+        }
         if (logIt) {
             NSLog(@"[vrspike] EyeVP[%zu] view %zu: eye(%.4f,%.4f,%.4f) -> scaled(%.4f,%.4f,%.4f)",
                   v, src, (double)eyePos.x, (double)eyePos.y, (double)eyePos.z,
@@ -560,6 +640,15 @@ void sm64_vr_spike_run(void *layer_renderer_ptr, int variant) {
                         [blit endEncoding];
                     }
                 }
+            }
+
+            // Eye dump: once automatically after the world has settled, and on
+            // demand from the settings button. Done here, where this loop owns a
+            // Metal queue and the copies are a known-complete pair.
+            if (sVrWorld && (sVrDumpRequest || frames == 300) && sVrEyeCopy[0] && sVrEyeCopy[1]) {
+                sVrDumpRequest = 0;
+                sm64_vr_write_png(sVrEyeCopy[0], queue, @"vr-eye-L.png");
+                sm64_vr_write_png(sVrEyeCopy[1], queue, @"vr-eye-R.png");
             }
 
             size_t views = cp_drawable_get_view_count(drawable);

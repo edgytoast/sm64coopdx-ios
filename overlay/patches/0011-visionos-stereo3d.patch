@@ -2879,7 +2879,7 @@ WHAT IS NOT TOUCHED
 +#endif // SM64_VR_SPIKE_H
 --- /dev/null
 +++ b/src/pc/vision3d/sm64_vr_spike.m
-@@ -0,0 +1,767 @@
+@@ -0,0 +1,796 @@
 +// sm64_vr_spike.m — R0 SPIKE, THROWAWAY. See sm64_vr_spike.h for the question
 +// this exists to answer (VR-CHARTER §5 R0.1 / A7).
 +//
@@ -2987,14 +2987,28 @@ WHAT IS NOT TOUCHED
 +void sm64_vr_spike_recenter(void) { sVrRefreeze = 1; }
 +
 +static float sVrEyeVP[2][4][4];
++static float sVrHudVP[2][4][4];
 +static volatile int sVrValid = 0;      // read by the ENGINE thread
 +static int sVrWorld = 0;               // world mode on (vs the clear-only probe)
++
++// The head-locked HUD plane (charter A6): how far ahead the 2D layer sits, and
++// how wide it is there. 1.5 m is the charter's number; the half-width gives the
++// game's 2D layer a ~50 degree span, which is close to how big it feels on the
++// flat panel.
++static const float kVrHudDist = 1.5f;
++static const float kVrHudHalfW = 0.70f;
++static const float kVrHudHalfH = 0.52f;  // 4:3 against the half-width
 +
 +// Called from gfx_stereo_projection on the engine thread, once per matrix
 +// composition — kept to a flag test and a pointer.
 +const float *sm64_vr_eye_viewproj(int eye) {
 +    if (!sVrValid || eye < 1 || eye > 2) { return NULL; }
 +    return &sVrEyeVP[eye - 1][0][0];
++}
++
++const float *sm64_vr_hud_matrix(int eye) {
++    if (!sVrValid || eye < 1 || eye > 2) { return NULL; }
++    return &sVrHudVP[eye - 1][0][0];
 +}
 +
 +int sm64_vr_hide_background(void) { return sVrWorld; }
@@ -3211,6 +3225,21 @@ WHAT IS NOT TOUCHED
 +        simd_float4x4 P = sm64_vr_forward_z_projection(cpProj, zn, zf);
 +        simd_float4x4 M = simd_mul(P, simd_mul(eyeFromOrigin, A));
 +        memcpy(&sVrEyeVP[v][0][0], &M, sizeof(sVrEyeVP[v])); // simd column-major == fast3d transpose
++
++        // The HUD plane (charter A6). Maps the game's own ortho OUTPUT — which is
++        // already NDC — onto a quad kVrHudDist metres ahead in HEAD space, then
++        // through this eye's frustum. Head space, not eye space, is the whole
++        // point: a quad at a real distance from the head gives both eyes the
++        // disparity that distance deserves, where the old pass-through gave the
++        // 2D layer zero TEXTURE disparity and therefore a huge ANGULAR one.
++        simd_float4x4 plane = (simd_float4x4){{ {0,0,0,0}, {0,0,0,0}, {0,0,0,0}, {0,0,0,0} }};
++        plane.columns[0].x = kVrHudHalfW;   // ndc.x -> metres across the plane
++        plane.columns[1].y = kVrHudHalfH;   // ndc.y -> metres up the plane
++        plane.columns[3].z = -kVrHudDist;   // the plane's distance, ndc.z discarded
++        plane.columns[3].w = 1.0f;
++        simd_float4x4 eyeFromDevice = simd_inverse(deviceFromEye);
++        simd_float4x4 hud = simd_mul(P, simd_mul(eyeFromDevice, plane));
++        memcpy(&sVrHudVP[v][0][0], &hud, sizeof(sVrHudVP[v]));
 +        if (logIt) {
 +            sm64_vr_log_projection((int)v, cpProj, P);
 +            // The PUBLISHED matrix, all 16 values, in the row-vector form the
@@ -3649,7 +3678,7 @@ WHAT IS NOT TOUCHED
 +#endif // SM64_VISION_3D
 --- a/src/pc/gfx/gfx_pc.c
 +++ b/src/pc/gfx/gfx_pc.c
-@@ -657,8 +657,172 @@
+@@ -657,8 +657,184 @@
  
      gfx_transposed_matrix_mul(coeffs, light_dir, rsp.modelview_matrix_stack[rsp.modelview_matrix_stack_size - 1]);
      vec3f_normalize(coeffs);
@@ -3700,7 +3729,7 @@ WHAT IS NOT TOUCHED
 +void sm64_gfx_set_3d_eye(int eye) {
 +    sm64_gfx_3d_eye = (eye >= SM64_EYE_OFF && eye <= SM64_EYE_RIGHT) ? eye : SM64_EYE_OFF;
  }
-+
+ 
 +void sm64_gfx_set_3d_params(float separation, float convergence, float hud_depth) {
 +    if (separation >= 0.0f && separation <= 60.0f) { sm64_gfx_3d_sep = separation; } // clamp raised 40->60 for the 2026-07-23 depth rescale (new slider max 54)
 +    if (convergence >= 50.0f && convergence <= 8000.0f) { sm64_gfx_3d_conv = convergence; }
@@ -3716,7 +3745,8 @@ WHAT IS NOT TOUCHED
 +// VR is not driving, so the panel path below is byte-for-byte unchanged.
 +const float *sm64_vr_eye_viewproj(int eye);   // sm64_vr_spike.m
 +int          sm64_vr_hide_background(void);   // 1 = drop the ortho skybox
- 
++const float *sm64_vr_hud_matrix(int eye);     // ortho -> head-locked plane -> eye clip
++
 +// The projection to compose into MP for the eye currently in flight.
 +static float (*gfx_stereo_projection(void))[4] {
 +    if (sm64_gfx_3d_eye == SM64_EYE_OFF) { return rsp.P_matrix; }
@@ -3734,6 +3764,17 @@ WHAT IS NOT TOUCHED
 +                if (sm64_gfx_bg_layer && sm64_vr_hide_background()) {
 +                    mtxf_copy(sm64_gfx_eye_P, rsp.P_matrix);
 +                    sm64_gfx_eye_P[3][0] += 10.0f; // ortho w == 1 => NDC x ~ +10, fully clipped
++                    return sm64_gfx_eye_P;
++                }
++                // HUD / menus (charter A6). Passing the game's ortho through
++                // UNCHANGED gives the 2D layer zero disparity in TEXTURE space,
++                // which on canted VR optics is a ~0.54 NDC ANGULAR split — a
++                // massively doubled HUD (measured on device 2026-08-07 from the
++                // eye dumps). Compose the game's ortho onto a HEAD-LOCKED plane
++                // instead, so both eyes place it at one real distance.
++                const float *hud = sm64_vr_hud_matrix(sm64_gfx_3d_eye);
++                if (hud != NULL) {
++                    mtxf_mul(sm64_gfx_eye_P, rsp.P_matrix, (float (*)[4])hud);
 +                    return sm64_gfx_eye_P;
 +                }
 +                return rsp.P_matrix;
@@ -3822,7 +3863,7 @@ WHAT IS NOT TOUCHED
  static void OPTIMIZE_O3 gfx_sp_matrix(uint8_t parameters, const int32_t *addr) {
  
      Mat4 matrix;
-@@ -705,7 +869,7 @@
+@@ -705,7 +881,7 @@
          }
          rsp.lights_changed = 1;
      }
@@ -3831,7 +3872,7 @@ WHAT IS NOT TOUCHED
  }
  
  static void gfx_sp_pop_matrix(uint32_t count) {
-@@ -713,7 +877,7 @@
+@@ -713,13 +889,19 @@
          if (rsp.modelview_matrix_stack_size > 0) {
              --rsp.modelview_matrix_stack_size;
              if (rsp.modelview_matrix_stack_size > 0) {
@@ -3840,7 +3881,19 @@ WHAT IS NOT TOUCHED
              }
          }
      }
-@@ -2050,6 +2214,12 @@
+ }
+ 
+ static float gfx_adjust_x_for_aspect_ratio(float x) {
++#ifdef SM64_VISION_3D
++    // VR: the projection IS the compositor's per-eye frustum, so ANY extra
++    // horizontal scaling breaks the NDC->direction mapping its optics assume.
++    // See gen-patch-0011.py section 2d for the device measurement.
++    if (sm64_vr_eye_viewproj(sm64_gfx_3d_eye) != NULL) { return x; }
++#endif
+     float adjusted = x * gfx_current_dimensions.x_adjust_ratio;
+ 
+     // Force 2D coordinates to be aligned perfectly on the nearest pixel
+@@ -2050,6 +2232,12 @@
  }
  
  static void gfx_sp_reset(void) {
@@ -3853,7 +3906,7 @@ WHAT IS NOT TOUCHED
      rsp.modelview_matrix_stack_size = 1;
      rsp.current_num_lights = 2;
      rsp.lights_changed = true;
-@@ -2078,6 +2248,11 @@
+@@ -2078,6 +2266,11 @@
      return gfx_rapi;
  }
  
@@ -3865,7 +3918,7 @@ WHAT IS NOT TOUCHED
  void gfx_start_frame(void) {
      if (gGfxPcResetTex1 > 0) {
          gGfxPcResetTex1--;
-@@ -2086,6 +2261,21 @@
+@@ -2086,6 +2279,21 @@
      }
      gfx_wapi->handle_events();
      gfx_wapi->get_dimensions(&gfx_current_dimensions.width, &gfx_current_dimensions.height);
@@ -3887,7 +3940,7 @@ WHAT IS NOT TOUCHED
      if (gfx_current_dimensions.height == 0) {
          // Avoid division by zero
          gfx_current_dimensions.height = 1;
-@@ -2100,6 +2290,42 @@
+@@ -2100,6 +2308,42 @@
  }
  
  void gfx_run(Gfx *commands) {
@@ -3930,7 +3983,7 @@ WHAT IS NOT TOUCHED
      gfx_sp_reset();
  
      sHasInverseCameraMatrix = false;
-@@ -2458,6 +2684,17 @@
+@@ -2458,6 +2702,17 @@
  void OPTIMIZE_O3 ext_gfx_run_dl(Gfx* cmd) {
      uint32_t opcode = cmd->words.w0 >> 24;
      switch (opcode) {

@@ -271,6 +271,7 @@ static Mat4 sm64_gfx_eye_P;
 // VR is not driving, so the panel path below is byte-for-byte unchanged.
 const float *sm64_vr_eye_viewproj(int eye);   // sm64_vr_spike.m
 int          sm64_vr_hide_background(void);   // 1 = drop the ortho skybox
+const float *sm64_vr_hud_matrix(int eye);     // ortho -> head-locked plane -> eye clip
 
 // The projection to compose into MP for the eye currently in flight.
 static float (*gfx_stereo_projection(void))[4] {
@@ -289,6 +290,17 @@ static float (*gfx_stereo_projection(void))[4] {
                 if (sm64_gfx_bg_layer && sm64_vr_hide_background()) {
                     mtxf_copy(sm64_gfx_eye_P, rsp.P_matrix);
                     sm64_gfx_eye_P[3][0] += 10.0f; // ortho w == 1 => NDC x ~ +10, fully clipped
+                    return sm64_gfx_eye_P;
+                }
+                // HUD / menus (charter A6). Passing the game's ortho through
+                // UNCHANGED gives the 2D layer zero disparity in TEXTURE space,
+                // which on canted VR optics is a ~0.54 NDC ANGULAR split — a
+                // massively doubled HUD (measured on device 2026-08-07 from the
+                // eye dumps). Compose the game's ortho onto a HEAD-LOCKED plane
+                // instead, so both eyes place it at one real distance.
+                const float *hud = sm64_vr_hud_matrix(sm64_gfx_3d_eye);
+                if (hud != NULL) {
+                    mtxf_mul(sm64_gfx_eye_P, rsp.P_matrix, (float (*)[4])hud);
                     return sm64_gfx_eye_P;
                 }
                 return rsp.P_matrix;
@@ -517,6 +529,35 @@ NEW_DIMS = """    gfx_wapi->get_dimensions(&gfx_current_dimensions.width, &gfx_c
     }
 #endif
     if (gfx_current_dimensions.height == 0) {"""
+# ---------------------------------------------------------------------------
+# 2d. gfx_adjust_x_for_aspect_ratio — DO NOT squeeze x in VR.
+#
+# THE CAUSE OF THE DOUBLED VR VIEW, measured on device 2026-08-07. This function
+# multiplies EVERY vertex's clip.x by (4/3)/aspect so a 4:3-designed game fills a
+# widescreen target: 0.75 on our 16:9 eye render. On the flat 3D panel that is
+# both correct and harmless (identical for both eyes). In VR the projection is
+# the COMPOSITOR's own per-eye frustum, and Vision Pro cants those frusta ~36
+# degrees apart, so a 0.75x on clip.x compresses each eye toward its OWN centre
+# and leaves the two images angularly wrong by a large constant in OPPOSITE
+# directions — double vision that the stereo slider barely moves, because the
+# error is not parallax at all.
+#
+# Proof, not inference: the published matrices predict 0.555 NDC of disparity at
+# the castle and 0.582 near; the dumped eye images measure 0.430 and 0.465, a
+# 0.78x ratio. Pristine territory — no other overlay hunk touches this function.
+OLD_ASPECT = """static float gfx_adjust_x_for_aspect_ratio(float x) {
+    float adjusted = x * gfx_current_dimensions.x_adjust_ratio;"""
+NEW_ASPECT = """static float gfx_adjust_x_for_aspect_ratio(float x) {
+#ifdef SM64_VISION_3D
+    // VR: the projection IS the compositor's per-eye frustum, so ANY extra
+    // horizontal scaling breaks the NDC->direction mapping its optics assume.
+    // See gen-patch-0011.py section 2d for the device measurement.
+    if (sm64_vr_eye_viewproj(sm64_gfx_3d_eye) != NULL) { return x; }
+#endif
+    float adjusted = x * gfx_current_dimensions.x_adjust_ratio;"""
+t_gfx = replace_once(t_gfx, OLD_ASPECT, NEW_ASPECT, "gfx-aspect-vr-bypass",
+                     "gen-patch-0011.py section 2d")
+
 t_gfx = replace_once(t_gfx, OLD_DIMS, NEW_DIMS, "gfx-start-frame-panel-aspect",
                      "sm64_3d_get_render_target_size(&sm64_vw, &sm64_vh)")
 

@@ -105,14 +105,28 @@ static volatile int sVrRefreeze = 0;
 void sm64_vr_spike_recenter(void) { sVrRefreeze = 1; }
 
 static float sVrEyeVP[2][4][4];
+static float sVrHudVP[2][4][4];
 static volatile int sVrValid = 0;      // read by the ENGINE thread
 static int sVrWorld = 0;               // world mode on (vs the clear-only probe)
+
+// The head-locked HUD plane (charter A6): how far ahead the 2D layer sits, and
+// how wide it is there. 1.5 m is the charter's number; the half-width gives the
+// game's 2D layer a ~50 degree span, which is close to how big it feels on the
+// flat panel.
+static const float kVrHudDist = 1.5f;
+static const float kVrHudHalfW = 0.70f;
+static const float kVrHudHalfH = 0.52f;  // 4:3 against the half-width
 
 // Called from gfx_stereo_projection on the engine thread, once per matrix
 // composition — kept to a flag test and a pointer.
 const float *sm64_vr_eye_viewproj(int eye) {
     if (!sVrValid || eye < 1 || eye > 2) { return NULL; }
     return &sVrEyeVP[eye - 1][0][0];
+}
+
+const float *sm64_vr_hud_matrix(int eye) {
+    if (!sVrValid || eye < 1 || eye > 2) { return NULL; }
+    return &sVrHudVP[eye - 1][0][0];
 }
 
 int sm64_vr_hide_background(void) { return sVrWorld; }
@@ -329,6 +343,21 @@ static void sm64_vr_build_matrices(cp_drawable_t drawable, simd_float4x4 frozenH
         simd_float4x4 P = sm64_vr_forward_z_projection(cpProj, zn, zf);
         simd_float4x4 M = simd_mul(P, simd_mul(eyeFromOrigin, A));
         memcpy(&sVrEyeVP[v][0][0], &M, sizeof(sVrEyeVP[v])); // simd column-major == fast3d transpose
+
+        // The HUD plane (charter A6). Maps the game's own ortho OUTPUT — which is
+        // already NDC — onto a quad kVrHudDist metres ahead in HEAD space, then
+        // through this eye's frustum. Head space, not eye space, is the whole
+        // point: a quad at a real distance from the head gives both eyes the
+        // disparity that distance deserves, where the old pass-through gave the
+        // 2D layer zero TEXTURE disparity and therefore a huge ANGULAR one.
+        simd_float4x4 plane = (simd_float4x4){{ {0,0,0,0}, {0,0,0,0}, {0,0,0,0}, {0,0,0,0} }};
+        plane.columns[0].x = kVrHudHalfW;   // ndc.x -> metres across the plane
+        plane.columns[1].y = kVrHudHalfH;   // ndc.y -> metres up the plane
+        plane.columns[3].z = -kVrHudDist;   // the plane's distance, ndc.z discarded
+        plane.columns[3].w = 1.0f;
+        simd_float4x4 eyeFromDevice = simd_inverse(deviceFromEye);
+        simd_float4x4 hud = simd_mul(P, simd_mul(eyeFromDevice, plane));
+        memcpy(&sVrHudVP[v][0][0], &hud, sizeof(sVrHudVP[v]));
         if (logIt) {
             sm64_vr_log_projection((int)v, cpProj, P);
             // The PUBLISHED matrix, all 16 values, in the row-vector form the

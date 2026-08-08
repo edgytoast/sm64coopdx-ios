@@ -123,7 +123,7 @@ WHAT IS NOT TOUCHED
 
 --- /dev/null
 +++ b/src/pc/vision3d/sm64_vision_3d.h
-@@ -0,0 +1,235 @@
+@@ -0,0 +1,242 @@
 +#ifndef SM64_VISION_3D_H
 +#define SM64_VISION_3D_H
 +
@@ -253,6 +253,10 @@ WHAT IS NOT TOUCHED
 +// way to kill the edge shimmer there.
 +void gfx_metal_set_msaa(int samples);
 +
++// Yaw-only stick look in VR first-person (sm64_vr_presets.c), read by
++// first_person_cam.c at the pitch fold.
++bool sm64_vr_stick_turn_only(void);
++
 +// ---------------------------------------------------------------------------
 +// Panel + loop — implemented in sm64_immersive.m.
 +// ---------------------------------------------------------------------------
@@ -349,6 +353,9 @@ WHAT IS NOT TOUCHED
 +#define SM64_DEF_VRRENDER    0.85f   // eye render size as a fraction of the per-eye view
 +#define SM64_DEF_VRWORLDLOCK 1.0f    // 1 = look around the world; 0 = it follows your head
 +#define SM64_DEF_VRDIM       1.00f   // surroundings dimming; 1.0 = no passthrough
++#define SM64_DEF_VRTURNONLY  1.0f    // first-person stick TURNS only; the headset owns
++                                     // pitch, and a stick that also pitches fights it —
++                                     // the donor's first public player request.
 +#define SM64_DEF_VRMSAA      2.0f    // VR eye-pass MSAA. 2x by Austin's eye on device
 +                                     // (2026-08-07): "2x is good ... hard to see noticeable
 +                                     // improvement after that", and it is the cheapest rung.
@@ -432,7 +439,7 @@ WHAT IS NOT TOUCHED
 +#endif // SM64_VISION_HOST_H
 --- /dev/null
 +++ b/src/pc/vision3d/sm64_vision_host.m
-@@ -0,0 +1,688 @@
+@@ -0,0 +1,689 @@
 +// sm64_vision_host.m — boots the SDL/coopdx engine under the SwiftUI app entry
 +// (visionOS only) and owns the 2D<->3D transition sequencing.
 +//
@@ -731,6 +738,7 @@ WHAT IS NOT TOUCHED
 +        sm64_vr_spike_set_panel_mode(sm64_vr_frame_is_nongameplay() ? 1 : 0);
 +        sm64_vr_poll_hotkeys();     // d-pad up cycles the view mode
 +        sm64_vr_anticlip_resolve(); // level collision keeps the view out of walls
++        sm64_vr_sync_first_person(); // FP mode drives the game's own FP camera
 +    }
 +
 +    // R0 SPIKE (throwaway): arm the console bridge on the DEVICE. The bridge is
@@ -2099,7 +2107,7 @@ WHAT IS NOT TOUCHED
 +#endif // SM64_VISION_3D
 --- /dev/null
 +++ b/src/pc/vision3d/sm64_vision_settings.m
-@@ -0,0 +1,385 @@
+@@ -0,0 +1,390 @@
 +// sm64_vision_settings.m — the "Vision Pro 3D" settings table.
 +//
 +// Ported from vkQuake-ios ios/shell/ios_settings.m's "Vision Pro 3D" section,
@@ -2271,7 +2279,8 @@ WHAT IS NOT TOUCHED
 +        // PARITY with the in-game panel (Austin, 2026-08-08: "I am leaning that we
 +        // just exactly replicate each other"). Same store, same rows, either
 +        // menu — the only difference is where you happen to be standing.
-+        mkrow(@"VR Mode", @"vrPreset", SM64_ROW_SEG, 0, 1, 0),
++        mkrow(@"VR Mode", @"vrPreset", SM64_ROW_SEG, 0, 2, 0),
++        mkrow(@"Stick Look: Turn Only", @"vrTurnOnly", SM64_ROW_SWITCH, 0, 1, SM64_DEF_VRTURNONLY),
 +        mkrow(@"Antialiasing", @"vrMsaa", SM64_ROW_SLIDER, 1, 8, SM64_DEF_VRMSAA),
 +        // R0 SPIKE (throwaway). Stereo Strength is a COMFORT lever, not a fix for
 +        // doubling — 2026-08-07's device round settled that (0% doubled WORSE,
@@ -2324,7 +2333,7 @@ WHAT IS NOT TOUCHED
 +
 +- (void)resetVision3D {
 +    for (NSString *k in @[ @"dist", @"halfW", @"halfH", @"posH", @"sep", @"conv", @"convAuto", @"dim",
-+                           @"vrStereo", @"vrScale", @"vrDist", @"vrHeight", @"vrRender", @"vrDim", @"vrLock" ]) {
++                           @"vrStereo", @"vrScale", @"vrDist", @"vrHeight", @"vrRender", @"vrDim", @"vrLock", @"vrTurnOnly" ]) {
 +        [NSUserDefaults.standardUserDefaults
 +            removeObjectForKey:[@"sm64vp3d." stringByAppendingString:k]];
 +    }
@@ -2346,10 +2355,14 @@ WHAT IS NOT TOUCHED
 +        return c;
 +    }
 +    if (r.type == SM64_ROW_SEG) {
-+        NSArray *items = [r.key isEqualToString:@"vrPreset"]
-+            ? @[ [NSString stringWithUTF8String:sm64_vr_preset_name(0)],
-+                 [NSString stringWithUTF8String:sm64_vr_preset_name(1)] ]
-+            : @[ @"m", @"ft" ];
++        NSArray *items = @[ @"m", @"ft" ];
++        if ([r.key isEqualToString:@"vrPreset"]) {
++            NSMutableArray *modes = [NSMutableArray array];
++            for (int i = 0; i < sm64_vr_preset_count(); i++) {
++                [modes addObject:[NSString stringWithUTF8String:sm64_vr_preset_name(i)]];
++            }
++            items = modes;
++        }
 +        UISegmentedControl *seg = [[UISegmentedControl alloc] initWithItems:items];
 +        seg.selectedSegmentIndex = v > 0.5f ? 1 : 0;
 +        tag_ctl(seg, r);
@@ -2875,7 +2888,7 @@ WHAT IS NOT TOUCHED
 +}
 --- /dev/null
 +++ b/src/pc/vision3d/sm64_vr_spike.h
-@@ -0,0 +1,147 @@
+@@ -0,0 +1,151 @@
 +#ifndef SM64_VR_SPIKE_H
 +#define SM64_VR_SPIKE_H
 +
@@ -2982,6 +2995,10 @@ WHAT IS NOT TOUCHED
 +// Engine thread only — it reads the game's controller state.
 +void sm64_vr_poll_hotkeys(void);
 +
++// Keep the game's own first-person camera in step with the VR mode, including
++// the re-assert that survives a network reset clearing it underneath us.
++void sm64_vr_sync_first_person(void);
++
 +// The VR options panel stays in the stereo world so its sliders can be judged
 +// against the thing they change; the menu rides an enlarged HUD plane.
 +void sm64_vr_spike_set_menu_over_world(int on);
@@ -3025,7 +3042,7 @@ WHAT IS NOT TOUCHED
 +#endif // SM64_VR_SPIKE_H
 --- /dev/null
 +++ b/src/pc/vision3d/sm64_vr_spike.m
-@@ -0,0 +1,1128 @@
+@@ -0,0 +1,1142 @@
 +// sm64_vr_spike.m — R0 SPIKE, THROWAWAY. See sm64_vr_spike.h for the question
 +// this exists to answer (VR-CHARTER §5 R0.1 / A7).
 +//
@@ -3120,7 +3137,7 @@ WHAT IS NOT TOUCHED
 +static float sVrAnticlipOffset[3] = { 0.0f, 0.0f, 0.0f };
 +
 +bool sm64_vr_anticlip_get_head_campos(float out[3]) {
-+    if (!sVrHeadCamValid || sVrPanelMode) { return false; }
++    if (!sVrHeadCamValid || sVrPanelMode || sm64_vr_first_person_active()) { return false; }
 +    out[0] = sVrHeadCamPos[0]; out[1] = sVrHeadCamPos[1]; out[2] = sVrHeadCamPos[2];
 +    return true;
 +}
@@ -3393,7 +3410,17 @@ WHAT IS NOT TOUCHED
 +// frozen head at kVrHeight, facing the way the head faced (levelled — no pitch
 +// or roll leaks into the world, the same rule the 3D panel already follows).
 +static simd_float4x4 sm64_vr_placement(simd_float4x4 frozenHead, simd_float4x4 liveHead) {
-+    simd_float3 headPos = frozenHead.columns[3].xyz;
++    // FIRST PERSON is the one mode whose anchor is NOT a place in your room.
++    // Diorama and Third-person put the world somewhere and let you look around
++    // it, so their placement uses the head pose captured at entry. In
++    // first-person the game's camera is Mario's eye and it travels with him, so
++    // the anchor must ride your LIVE head — otherwise you would drift out of
++    // your own body as you moved. Orientation still comes from the anchored
++    // (levelled) forward, so the world does not spin when you turn your head:
++    // that rotation belongs to the view, and it is already there.
++    simd_float3 headPos = sm64_vr_first_person_active()
++        ? liveHead.columns[3].xyz
++        : frozenHead.columns[3].xyz;
 +    simd_float3 fwd = -frozenHead.columns[2].xyz;
 +    fwd.y = 0.0f;
 +    float len = simd_length(fwd);
@@ -3422,7 +3449,11 @@ WHAT IS NOT TOUCHED
 +    // This is the GEOMETRIC half of the donor's anti-clip; theirs also runs level
 +    // collision so the eye cannot end up inside a wall, which needs the engine
 +    // thread and is a later step.
-+    {
++    if (sm64_vr_first_person_active()) {
++        // The eye IS the camera here, so the standoff would shove the world away
++        // from your face permanently (donor vr.c:518). Nothing to keep clear of.
++        sVrClipPush = 0.0f;
++    } else {
 +        simd_float3 livePos = liveHead.columns[3].xyz;
 +        simd_float3 toAnchor = pos - livePos;
 +        float d = simd_length(toAnchor);
@@ -4189,7 +4220,7 @@ WHAT IS NOT TOUCHED
 +#endif // DJUI_PANEL_VR_H
 --- /dev/null
 +++ b/src/pc/vision3d/djui_panel_vr.c
-@@ -0,0 +1,162 @@
+@@ -0,0 +1,168 @@
 +// djui_panel_vr.c — the in-game VR options panel (Options -> VR).
 +//
 +// See djui_panel_vr.h for why this exists and what belongs here rather than in
@@ -4220,6 +4251,7 @@ WHAT IS NOT TOUCHED
 +static unsigned int sUiMsaa;     // index into sMsaaChoices
 +static unsigned int sUiMode;     // view mode (sm64_vr_presets.c)
 +static bool sUiWorldLock;
++static bool sUiTurnOnly;   // first-person: stick turns, headset pitches
 +
 +// DJUI sliders are unsigned, and the world can sit BELOW eye level (it usually
 +// should — you look down at a diorama), so the height row carries a bias.
@@ -4252,6 +4284,7 @@ WHAT IS NOT TOUCHED
 +    sUiMsaa      = vr_msaa_index_of((int) sm64_3d_setting_f("vrMsaa", SM64_DEF_VRMSAA));
 +    sUiWorldLock = sm64_3d_setting_f("vrLock", SM64_DEF_VRWORLDLOCK) > 0.5f;
 +    sUiMode      = (unsigned int) sm64_vr_preset_get();
++    sUiTurnOnly  = sm64_3d_setting_f("vrTurnOnly", SM64_DEF_VRTURNONLY) > 0.5f;
 +}
 +
 +// Switching modes restores that mode's own numbers, so the sliders below have to
@@ -4272,6 +4305,7 @@ WHAT IS NOT TOUCHED
 +    sm64_3d_setting_set_f("vrRender", (float) sUiRender / 100.0f);
 +    sm64_3d_setting_set_f("vrDim", (float) sUiDim / 100.0f);
 +    sm64_3d_setting_set_f("vrLock", sUiWorldLock ? 1.0f : 0.0f);
++    sm64_3d_setting_set_f("vrTurnOnly", sUiTurnOnly ? 1.0f : 0.0f);
 +    if (sUiMsaa < (unsigned int) VR_MSAA_COUNT) {
 +        sm64_3d_setting_set_f("vrMsaa", (float) sMsaaSamples[sUiMsaa]);
 +    }
@@ -4291,6 +4325,7 @@ WHAT IS NOT TOUCHED
 +    sm64_3d_setting_set_f("vrDim", SM64_DEF_VRDIM);
 +    sm64_3d_setting_set_f("vrLock", SM64_DEF_VRWORLDLOCK);
 +    sm64_3d_setting_set_f("vrMsaa", SM64_DEF_VRMSAA);
++    sm64_3d_setting_set_f("vrTurnOnly", SM64_DEF_VRTURNONLY);
 +    vr_panel_pull();
 +    sm64_3d_apply_settings();
 +    // No panel rebuild: DJUI sliders read *value when they RENDER
@@ -4330,6 +4365,8 @@ WHAT IS NOT TOUCHED
 +        djui_slider_create(body, "World Distance", &sUiDist, 0, 350, vr_panel_push);
 +        djui_slider_create(body, "World Height", &sUiHeight, 0, 200, vr_panel_push);
 +        djui_checkbox_create(body, "World Lock", &sUiWorldLock, vr_panel_push);
++        // First-person only: the headset already owns pitch.
++        djui_checkbox_create(body, "Stick Look: Turn Only", &sUiTurnOnly, vr_panel_push);
 +
 +        // Comfort and image.
 +        djui_slider_create(body, "Stereo Depth", &sUiStereo, 0, 100, vr_panel_push);
@@ -4354,7 +4391,7 @@ WHAT IS NOT TOUCHED
 +#endif // SM64_VISION_3D
 --- /dev/null
 +++ b/src/pc/vision3d/sm64_vr_gamestate.c
-@@ -0,0 +1,217 @@
+@@ -0,0 +1,235 @@
 +// sm64_vr_gamestate.c — "is this frame a menu?", answered from the game's own
 +// state machine (charter A5, ported from the donor's vr_frame_is_nongameplay,
 +// pc_main.c:274-305).
@@ -4397,6 +4434,7 @@ WHAT IS NOT TOUCHED
 +#include "game/object_helpers.h"    // dist_between_objects
 +#include "pc/djui/djui_chat_box.h"  // the menu-button long press
 +#include "pc/network/network.h"     // gNetworkType: chat is networked-only
++#include "game/first_person_cam.h" // the game's own first-person camera
 +#include <math.h>
 +#include "pc/utils/misc.h"       // clock_elapsed_f64
 +#include <string.h>
@@ -4431,6 +4469,23 @@ WHAT IS NOT TOUCHED
 +    if (gCurrDemoInput != NULL)    { return true; }  // attract-mode demo
 +    if (gMenuMode != -1)           { return true; }  // pause star grid / course complete
 +    return false;                                    // active gameplay
++}
++
++// Keep coopdx's OWN first-person camera in step with the VR mode. The
++// mismatch-only re-assert is the donor's network-reset survival (their
++// pc_main.c:524-529): joining or leaving a lobby, and some Lua mods, clear the
++// game-side flag without the VR mode changing, which used to leave the view
++// broken until you cycled modes. The DISABLE direction stays change-only, so a
++// player who turns on the game's own first-person in a non-VR mode keeps it.
++void sm64_vr_sync_first_person(void) {
++    static bool prev = false;
++    bool want = sm64_vr_first_person_active();
++    if (want != prev) {
++        set_first_person_enabled(want);
++        prev = want;
++    } else if (want && !gFirstPersonCamera.enabled) {
++        set_first_person_enabled(true);
++    }
 +}
 +
 +// D-pad UP cycles the view mode, so switching does not mean opening a menu
@@ -4574,7 +4629,7 @@ WHAT IS NOT TOUCHED
 +#endif // SM64_VISION_3D
 --- /dev/null
 +++ b/src/pc/vision3d/sm64_vr_presets.c
-@@ -0,0 +1,123 @@
+@@ -0,0 +1,138 @@
 +// sm64_vr_presets.c — VR view modes (charter R2, donor vr.c:1493-1556).
 +//
 +// A "mode" is just a remembered set of placement numbers, and the donor's design
@@ -4602,6 +4657,7 @@ WHAT IS NOT TOUCHED
 +    float scale;    // game units per metre (bigger = smaller world)
 +    float dist;     // metres in front of you the game's camera sits
 +    float height;   // metres relative to eye level
++    bool  firstPerson;
 +} SM64VrPreset;
 +
 +// Stock table. Diorama is ours, tuned on device; Third-person follows the
@@ -4616,9 +4672,16 @@ WHAT IS NOT TOUCHED
 +//                something on a table that you look DOWN at.
 +//   Third-person a ~9 m world with the game's camera essentially AT you, so the
 +//                level is around you and Mario is a foot tall.
++//   First-person LIFE SIZE: Mario is ~160 units and about 1.6 m, so 100 units to
++//                the metre is 1:1, and the game's own first-person camera puts
++//                the viewpoint at his head. Distance and height are zero because
++//                in this mode the anchor IS your eye — see the placement note in
++//                sm64_vr_spike.m about why FP tracks the live head instead of
++//                staying anchored in the room.
 +static const SM64VrPreset sPresets[] = {
-+    { "Diorama",      2200.0f,  0.55f, -0.60f },
-+    { "Third-person",  900.0f, -0.15f, -0.10f },
++    { "Diorama",      2200.0f,  0.55f, -0.60f, false },
++    { "Third-person",  900.0f, -0.15f, -0.10f, false },
++    { "First-person",  100.0f,  0.00f,  0.00f, true  },
 +};
 +#define SM64_VR_PRESET_COUNT ((int)(sizeof(sPresets) / sizeof(sPresets[0])))
 +
@@ -4680,7 +4743,14 @@ WHAT IS NOT TOUCHED
 +// is false today — but the hand-shaped gestures are gated on it rather than on
 +// nothing, so adding the mode turns them on instead of needing them found again.
 +bool sm64_vr_first_person_active(void) {
-+    return false;   // R4: becomes `sm64_vr_preset_get() == PRESET_FIRST_PERSON`
++    return sPresets[sm64_vr_preset_get()].firstPerson;
++}
++
++// Yaw-only stick look. True only in VR first-person AND when the setting is on
++// (default on, charter R4). Read from first_person_cam.c at the pitch fold.
++bool sm64_vr_stick_turn_only(void) {
++    return sm64_vr_first_person_active()
++        && sm64_3d_setting_f("vrTurnOnly", SM64_DEF_VRTURNONLY) > 0.5f;
 +}
 +
 +void sm64_vr_preset_cycle(void) {
@@ -5362,6 +5432,27 @@ WHAT IS NOT TOUCHED
          case G_TEXCLIP_DJUI:
              djui_gfx_dp_set_clipping(C0(16, 8), C0(8, 8), C1(16, 8), C1(8, 8));
              break;
+--- a/src/game/first_person_cam.c
++++ b/src/game/first_person_cam.c
+@@ -1,4 +1,5 @@
+ #include "first_person_cam.h"
++#include "pc/vision3d/sm64_vision_3d.h"
+ 
+ #include "sm64.h"
+ #include "behavior_data.h"
+@@ -76,6 +77,12 @@
+         }
+ 
+         // update pitch
++#ifdef SM64_VISION_3D
++        // VR first-person: the HEADSET owns pitch. A stick that also pitches
++        // fights it, which was the donor's first public player complaint.
++        extern bool sm64_vr_stick_turn_only(void);
++        if (sm64_vr_stick_turn_only()) { extStickY = 0.0f; mouse_y = 0; }
++#endif
+         if (!gFirstPersonCamera.forcePitch) {
+             gFirstPersonCamera.pitch -= sensY * (extStickY - 1.5f * mouse_y);
+             gFirstPersonCamera.pitch = clamp(gFirstPersonCamera.pitch, -0x3F00, 0x3F00);
 --- a/src/pc/controller/controller_entry_point.c
 +++ b/src/pc/controller/controller_entry_point.c
 @@ -7,6 +7,7 @@

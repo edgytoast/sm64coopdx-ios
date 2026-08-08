@@ -25,6 +25,7 @@ typedef struct {
     float scale;    // game units per metre (bigger = smaller world)
     float dist;     // metres in front of you the game's camera sits
     float height;   // metres relative to eye level
+    bool  firstPerson;
 } SM64VrPreset;
 
 // Stock table. Diorama is ours, tuned on device; Third-person follows the
@@ -39,9 +40,16 @@ typedef struct {
 //                something on a table that you look DOWN at.
 //   Third-person a ~9 m world with the game's camera essentially AT you, so the
 //                level is around you and Mario is a foot tall.
+//   First-person LIFE SIZE: Mario is ~160 units and about 1.6 m, so 100 units to
+//                the metre is 1:1, and the game's own first-person camera puts
+//                the viewpoint at his head. Distance and height are zero because
+//                in this mode the anchor IS your eye — see the placement note in
+//                sm64_vr_spike.m about why FP tracks the live head instead of
+//                staying anchored in the room.
 static const SM64VrPreset sPresets[] = {
-    { "Diorama",      2200.0f,  0.55f, -0.60f },
-    { "Third-person",  900.0f, -0.15f, -0.10f },
+    { "Diorama",      2200.0f,  0.55f, -0.60f, false },
+    { "Third-person",  900.0f, -0.15f, -0.10f, false },
+    { "First-person",  100.0f,  0.00f,  0.00f, true  },
 };
 #define SM64_VR_PRESET_COUNT ((int)(sizeof(sPresets) / sizeof(sPresets[0])))
 
@@ -103,7 +111,14 @@ void sm64_vr_preset_apply(int idx) {
 // is false today — but the hand-shaped gestures are gated on it rather than on
 // nothing, so adding the mode turns them on instead of needing them found again.
 bool sm64_vr_first_person_active(void) {
-    return false;   // R4: becomes `sm64_vr_preset_get() == PRESET_FIRST_PERSON`
+    return sPresets[sm64_vr_preset_get()].firstPerson;
+}
+
+// Yaw-only stick look. True only in VR first-person AND when the setting is on
+// (default on, charter R4). Read from first_person_cam.c at the pitch fold.
+bool sm64_vr_stick_turn_only(void) {
+    return sm64_vr_first_person_active()
+        && sm64_3d_setting_f("vrTurnOnly", SM64_DEF_VRTURNONLY) > 0.5f;
 }
 
 void sm64_vr_preset_cycle(void) {

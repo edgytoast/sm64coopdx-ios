@@ -104,6 +104,10 @@ bool        sm64_vr_first_person_active(void);
 // Engine thread only — it reads the game's controller state.
 void sm64_vr_poll_hotkeys(void);
 
+// Keep the game's own first-person camera in step with the VR mode, including
+// the re-assert that survives a network reset clearing it underneath us.
+void sm64_vr_sync_first_person(void);
+
 // The VR options panel stays in the stereo world so its sliders can be judged
 // against the thing they change; the menu rides an enlarged HUD plane.
 void sm64_vr_spike_set_menu_over_world(int on);

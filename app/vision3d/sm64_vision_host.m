@@ -296,6 +296,7 @@ void sm64_3d_frame_poll(void) {
         sm64_vr_spike_set_panel_mode(sm64_vr_frame_is_nongameplay() ? 1 : 0);
         sm64_vr_poll_hotkeys();     // d-pad up cycles the view mode
         sm64_vr_anticlip_resolve(); // level collision keeps the view out of walls
+        sm64_vr_sync_first_person(); // FP mode drives the game's own FP camera
     }
 
     // R0 SPIKE (throwaway): arm the console bridge on the DEVICE. The bridge is

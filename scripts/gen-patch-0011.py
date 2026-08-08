@@ -574,6 +574,43 @@ t_gfx = replace_once(t_gfx, OLD_DIMS, NEW_DIMS, "gfx-start-frame-panel-aspect",
 diffs.append(diff_edit(orig_gfx, t_gfx, REL_GFX))
 
 # ---------------------------------------------------------------------------
+# 2h. first_person_cam.c — yaw-only stick look in VR (charter R4).
+#
+# The donor's FIRST public player request, and they were right: in VR the headset
+# owns pitch, and a stick that also pitches fights it for control of where you
+# are looking. Charter R4 adopts it as the FP default.
+#
+# The fix lands at the CONSUMING FOLD, which is the donor's hard-won rule
+# (ledger: "the source ships RAW signs; each mode's fold owns its own feel; fix
+# the fold of the mode that feels wrong, NEVER the shared source"). Zeroing the
+# stick anywhere shared would break third-person's camera too. Pristine file, and
+# gated twice — on SM64_VISION_3D and on the setting — so nothing changes for
+# anyone not in VR first-person.
+REL_FPC = "src/game/first_person_cam.c"
+orig_fpc = (VENDOR / REL_FPC).read_text()
+
+OLD_FPC_INC = '#include "first_person_cam.h"'
+NEW_FPC_INC = ('#include "first_person_cam.h"\n'
+               '#include "pc/vision3d/sm64_vision_3d.h"')
+t_fpc = replace_once(orig_fpc, OLD_FPC_INC, NEW_FPC_INC, "fpc-vision-include",
+                     "pc/vision3d/sm64_vision_3d.h")
+
+OLD_FPC_PITCH = """        // update pitch
+        if (!gFirstPersonCamera.forcePitch) {"""
+NEW_FPC_PITCH = """        // update pitch
+#ifdef SM64_VISION_3D
+        // VR first-person: the HEADSET owns pitch. A stick that also pitches
+        // fights it, which was the donor's first public player complaint.
+        extern bool sm64_vr_stick_turn_only(void);
+        if (sm64_vr_stick_turn_only()) { extStickY = 0.0f; mouse_y = 0; }
+#endif
+        if (!gFirstPersonCamera.forcePitch) {"""
+t_fpc = replace_once(t_fpc, OLD_FPC_PITCH, NEW_FPC_PITCH, "fpc-yaw-only",
+                     "sm64_vr_stick_turn_only")
+
+diffs.append(diff_edit(orig_fpc, t_fpc, REL_FPC))
+
+# ---------------------------------------------------------------------------
 # 2g. controller_entry_point.c — register the Sense backend beside SDL.
 #
 # Charter A10, and the donor's own precedent: their VR backend sits beside

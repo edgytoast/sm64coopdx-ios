@@ -169,7 +169,8 @@ static __weak SM64SettingsVC *g_settingsVC = nil;
         // PARITY with the in-game panel (Austin, 2026-08-08: "I am leaning that we
         // just exactly replicate each other"). Same store, same rows, either
         // menu — the only difference is where you happen to be standing.
-        mkrow(@"VR Mode", @"vrPreset", SM64_ROW_SEG, 0, 1, 0),
+        mkrow(@"VR Mode", @"vrPreset", SM64_ROW_SEG, 0, 2, 0),
+        mkrow(@"Stick Look: Turn Only", @"vrTurnOnly", SM64_ROW_SWITCH, 0, 1, SM64_DEF_VRTURNONLY),
         mkrow(@"Antialiasing", @"vrMsaa", SM64_ROW_SLIDER, 1, 8, SM64_DEF_VRMSAA),
         // R0 SPIKE (throwaway). Stereo Strength is a COMFORT lever, not a fix for
         // doubling — 2026-08-07's device round settled that (0% doubled WORSE,
@@ -222,7 +223,7 @@ static __weak SM64SettingsVC *g_settingsVC = nil;
 
 - (void)resetVision3D {
     for (NSString *k in @[ @"dist", @"halfW", @"halfH", @"posH", @"sep", @"conv", @"convAuto", @"dim",
-                           @"vrStereo", @"vrScale", @"vrDist", @"vrHeight", @"vrRender", @"vrDim", @"vrLock" ]) {
+                           @"vrStereo", @"vrScale", @"vrDist", @"vrHeight", @"vrRender", @"vrDim", @"vrLock", @"vrTurnOnly" ]) {
         [NSUserDefaults.standardUserDefaults
             removeObjectForKey:[@"sm64vp3d." stringByAppendingString:k]];
     }
@@ -244,10 +245,14 @@ static __weak SM64SettingsVC *g_settingsVC = nil;
         return c;
     }
     if (r.type == SM64_ROW_SEG) {
-        NSArray *items = [r.key isEqualToString:@"vrPreset"]
-            ? @[ [NSString stringWithUTF8String:sm64_vr_preset_name(0)],
-                 [NSString stringWithUTF8String:sm64_vr_preset_name(1)] ]
-            : @[ @"m", @"ft" ];
+        NSArray *items = @[ @"m", @"ft" ];
+        if ([r.key isEqualToString:@"vrPreset"]) {
+            NSMutableArray *modes = [NSMutableArray array];
+            for (int i = 0; i < sm64_vr_preset_count(); i++) {
+                [modes addObject:[NSString stringWithUTF8String:sm64_vr_preset_name(i)]];
+            }
+            items = modes;
+        }
         UISegmentedControl *seg = [[UISegmentedControl alloc] initWithItems:items];
         seg.selectedSegmentIndex = v > 0.5f ? 1 : 0;
         tag_ctl(seg, r);

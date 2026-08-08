@@ -92,7 +92,7 @@ static volatile int sVrHeadCamValid = 0;
 static float sVrAnticlipOffset[3] = { 0.0f, 0.0f, 0.0f };
 
 bool sm64_vr_anticlip_get_head_campos(float out[3]) {
-    if (!sVrHeadCamValid || sVrPanelMode) { return false; }
+    if (!sVrHeadCamValid || sVrPanelMode || sm64_vr_first_person_active()) { return false; }
     out[0] = sVrHeadCamPos[0]; out[1] = sVrHeadCamPos[1]; out[2] = sVrHeadCamPos[2];
     return true;
 }
@@ -365,7 +365,17 @@ static void sm64_vr_log_projection(int eye, simd_float4x4 cp, simd_float4x4 fixe
 // frozen head at kVrHeight, facing the way the head faced (levelled — no pitch
 // or roll leaks into the world, the same rule the 3D panel already follows).
 static simd_float4x4 sm64_vr_placement(simd_float4x4 frozenHead, simd_float4x4 liveHead) {
-    simd_float3 headPos = frozenHead.columns[3].xyz;
+    // FIRST PERSON is the one mode whose anchor is NOT a place in your room.
+    // Diorama and Third-person put the world somewhere and let you look around
+    // it, so their placement uses the head pose captured at entry. In
+    // first-person the game's camera is Mario's eye and it travels with him, so
+    // the anchor must ride your LIVE head — otherwise you would drift out of
+    // your own body as you moved. Orientation still comes from the anchored
+    // (levelled) forward, so the world does not spin when you turn your head:
+    // that rotation belongs to the view, and it is already there.
+    simd_float3 headPos = sm64_vr_first_person_active()
+        ? liveHead.columns[3].xyz
+        : frozenHead.columns[3].xyz;
     simd_float3 fwd = -frozenHead.columns[2].xyz;
     fwd.y = 0.0f;
     float len = simd_length(fwd);
@@ -394,7 +404,11 @@ static simd_float4x4 sm64_vr_placement(simd_float4x4 frozenHead, simd_float4x4 l
     // This is the GEOMETRIC half of the donor's anti-clip; theirs also runs level
     // collision so the eye cannot end up inside a wall, which needs the engine
     // thread and is a later step.
-    {
+    if (sm64_vr_first_person_active()) {
+        // The eye IS the camera here, so the standoff would shove the world away
+        // from your face permanently (donor vr.c:518). Nothing to keep clear of.
+        sVrClipPush = 0.0f;
+    } else {
         simd_float3 livePos = liveHead.columns[3].xyz;
         simd_float3 toAnchor = pos - livePos;
         float d = simd_length(toAnchor);

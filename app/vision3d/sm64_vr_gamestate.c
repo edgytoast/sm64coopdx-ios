@@ -40,6 +40,7 @@
 #include "game/object_helpers.h"    // dist_between_objects
 #include "pc/djui/djui_chat_box.h"  // the menu-button long press
 #include "pc/network/network.h"     // gNetworkType: chat is networked-only
+#include "game/first_person_cam.h" // the game's own first-person camera
 #include <math.h>
 #include "pc/utils/misc.h"       // clock_elapsed_f64
 #include <string.h>
@@ -74,6 +75,23 @@ bool sm64_vr_frame_is_nongameplay(void) {
     if (gCurrDemoInput != NULL)    { return true; }  // attract-mode demo
     if (gMenuMode != -1)           { return true; }  // pause star grid / course complete
     return false;                                    // active gameplay
+}
+
+// Keep coopdx's OWN first-person camera in step with the VR mode. The
+// mismatch-only re-assert is the donor's network-reset survival (their
+// pc_main.c:524-529): joining or leaving a lobby, and some Lua mods, clear the
+// game-side flag without the VR mode changing, which used to leave the view
+// broken until you cycled modes. The DISABLE direction stays change-only, so a
+// player who turns on the game's own first-person in a non-VR mode keeps it.
+void sm64_vr_sync_first_person(void) {
+    static bool prev = false;
+    bool want = sm64_vr_first_person_active();
+    if (want != prev) {
+        set_first_person_enabled(want);
+        prev = want;
+    } else if (want && !gFirstPersonCamera.enabled) {
+        set_first_person_enabled(true);
+    }
 }
 
 // D-pad UP cycles the view mode, so switching does not mean opening a menu

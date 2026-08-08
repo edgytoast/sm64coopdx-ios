@@ -571,6 +571,38 @@ t_gfx = replace_once(t_gfx, OLD_DIMS, NEW_DIMS, "gfx-start-frame-panel-aspect",
 diffs.append(diff_edit(orig_gfx, t_gfx, REL_GFX))
 
 # ---------------------------------------------------------------------------
+# 2f. star_select.c — stamp the act/star selector for the VR panel routing.
+#
+# Charter A5's hybrid case: the selector draws 3D star models behind 2D text, so
+# no "did perspective happen" heuristic classifies it, and in the stereo world it
+# looks wrong (Austin, 2026-08-08). The donor added a game-side flag for exactly
+# this. A few frames of grace per update also covers the moment either side of
+# the load where the selector is still on screen. Pristine file, gated so iOS and
+# desktop are unchanged.
+REL_STAR = "src/menu/star_select.c"
+orig_star = (VENDOR / REL_STAR).read_text()
+
+OLD_STAR_INC = '#include "star_select.h"'
+NEW_STAR_INC = ('#include "star_select.h"\n'
+                '#include "pc/vision3d/sm64_vision_3d.h"')
+t_star = replace_once(orig_star, OLD_STAR_INC, NEW_STAR_INC, "star-select-include",
+                      "pc/vision3d/sm64_vision_3d.h")
+
+OLD_STAR_UPD = "s32 lvl_update_obj_and_load_act_button_actions(UNUSED s32 arg, UNUSED s32 unused) {"
+NEW_STAR_UPD = ('s32 lvl_update_obj_and_load_act_button_actions(UNUSED s32 arg, UNUSED s32 unused) {\n'
+                '#ifdef SM64_VISION_3D\n'
+                '    // visionOS VR: present this screen flat, like every other menu.\n'
+                '    extern int gVrActSelectorFrames;\n'
+                '    gVrActSelectorFrames = 4;\n'
+                '#endif')
+t_star = replace_once(orig_star, OLD_STAR_UPD, NEW_STAR_UPD, "star-select-stamp",
+                      "gVrActSelectorFrames") if False else replace_once(
+                      t_star, OLD_STAR_UPD, NEW_STAR_UPD, "star-select-stamp",
+                      "gVrActSelectorFrames = 4")
+
+diffs.append(diff_edit(orig_star, t_star, REL_STAR))
+
+# ---------------------------------------------------------------------------
 # 2e. djui_panel_options.c — one button for the in-game VR panel.
 #
 # Pristine territory: no other overlay hunk touches this file. The panel itself

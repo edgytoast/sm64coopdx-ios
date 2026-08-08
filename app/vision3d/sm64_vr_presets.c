@@ -30,9 +30,18 @@ typedef struct {
 // Stock table. Diorama is ours, tuned on device; Third-person follows the
 // donor's shape — a bigger world whose camera sits essentially AT you, so the
 // level is around you rather than on a table in front of you.
+// Austin, 2026-08-08: "the difference between diorama and 3rd person feels more
+// like how zoomed in you are. is that right?" — it was, and that is the honest
+// answer for any mode short of first-person: what changes is the world's SIZE
+// and where you stand in it. So the two are now pulled far enough apart to be
+// two places rather than two zoom levels:
+//   Diorama      a ~3.6 m world, in front of you and well below eye level —
+//                something on a table that you look DOWN at.
+//   Third-person a ~9 m world with the game's camera essentially AT you, so the
+//                level is around you and Mario is a foot tall.
 static const SM64VrPreset sPresets[] = {
-    { "Diorama",      1376.0f,  0.60f, -0.35f },
-    { "Third-person", 1200.0f, -0.10f,  0.00f },
+    { "Diorama",      2200.0f,  0.55f, -0.60f },
+    { "Third-person",  900.0f, -0.15f, -0.10f },
 };
 #define SM64_VR_PRESET_COUNT ((int)(sizeof(sPresets) / sizeof(sPresets[0])))
 

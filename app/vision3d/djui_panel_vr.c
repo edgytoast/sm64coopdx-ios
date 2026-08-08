@@ -107,6 +107,14 @@ static void vr_panel_reset(UNUSED struct DjuiBase *caller) {
     // would mean using `caller` after its own panel was freed.
 }
 
+// While THIS panel is open the world stays in stereo behind it, so every slider
+// can be judged against the thing it changes. DJUI tells us when the panel goes
+// away through on_panel_destroy, which is the only reliable end-of-life signal —
+// Back, Escape and a panel-stack unwind all route through it.
+static void vr_panel_destroyed(UNUSED struct DjuiBase *caller) {
+    sm64_vr_spike_set_menu_over_world(0);
+}
+
 void djui_panel_vr_create(struct DjuiBase *caller) {
     vr_panel_pull();
 
@@ -146,7 +154,9 @@ void djui_panel_vr_create(struct DjuiBase *caller) {
         djui_button_create(body, DLANG(MENU, BACK), DJUI_BUTTON_STYLE_BACK, djui_panel_menu_back);
     }
 
-    djui_panel_add(caller, panel, NULL);
+    struct DjuiPanel *added = djui_panel_add(caller, panel, NULL);
+    if (added != NULL) { added->on_panel_destroy = vr_panel_destroyed; }
+    sm64_vr_spike_set_menu_over_world(1);
 }
 
 #endif // SM64_VISION_3D

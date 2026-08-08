@@ -100,6 +100,22 @@ void        sm64_vr_preset_reset_current(void);
 // Engine thread only — it reads the game's controller state.
 void sm64_vr_poll_hotkeys(void);
 
+// The VR options panel stays in the stereo world so its sliders can be judged
+// against the thing they change; the menu rides an enlarged HUD plane.
+void sm64_vr_spike_set_menu_over_world(int on);
+int  sm64_vr_spike_menu_over_world(void);
+
+// Anti-clip handoff (charter R2). The loop publishes the cyclopean eye in
+// game-camera space; sm64_vr_anticlip_resolve (engine thread) runs the level's
+// collision on it and hands back an anchor offset in metres.
+bool  sm64_vr_anticlip_get_head_campos(float out[3]);
+void  sm64_vr_anticlip_set_offset(const float m[3]);
+float sm64_vr_anticlip_world_scale(void);
+void  sm64_vr_anticlip_resolve(void);
+
+// The act/star selector, stamped by star_select.c (see sm64_vr_gamestate.c).
+extern int gVrActSelectorFrames;
+
 // The VR eye-texture size, so gfx_metal and gfx_pc can both size from the VIEW
 // instead of the flat panel's budget. Returns 0 when VR is not driving.
 int sm64_vr_spike_render_size(int *w, int *h);

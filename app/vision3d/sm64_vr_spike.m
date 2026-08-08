@@ -75,6 +75,34 @@ static float sVrClipPush = 0.0f;          // the eased anti-clip pushback, metre
 // sizer above needs it too — a menu renders at a screen's shape, not a view's.
 static volatile int sVrPanelMode = 0;
 
+// While the VR options panel itself is open we deliberately STAY in the stereo
+// world (donor: djui_panel_is_vr_panel). Every slider in it describes the world,
+// and you cannot judge a world you have just replaced with a menu screen. The
+// menu rides the HUD plane instead — enlarged, because the donor's ledger has a
+// whole entry about the VR panel rendering half-size on the gameplay HUD quad.
+static volatile int sVrMenuOverWorld = 0;
+void sm64_vr_spike_set_menu_over_world(int on) { sVrMenuOverWorld = on ? 1 : 0; }
+int  sm64_vr_spike_menu_over_world(void) { return sVrMenuOverWorld; }
+
+// Anti-clip handoff (charter R2). The loop publishes the cyclopean eye in
+// game-camera space; the engine thread runs level collision on it and writes back
+// an anchor offset in metres, which the next frame's placement applies.
+static float sVrHeadCamPos[3] = { 0.0f, 0.0f, 0.0f };
+static volatile int sVrHeadCamValid = 0;
+static float sVrAnticlipOffset[3] = { 0.0f, 0.0f, 0.0f };
+
+bool sm64_vr_anticlip_get_head_campos(float out[3]) {
+    if (!sVrHeadCamValid || sVrPanelMode) { return false; }
+    out[0] = sVrHeadCamPos[0]; out[1] = sVrHeadCamPos[1]; out[2] = sVrHeadCamPos[2];
+    return true;
+}
+
+void sm64_vr_anticlip_set_offset(const float m[3]) {
+    sVrAnticlipOffset[0] = m[0]; sVrAnticlipOffset[1] = m[1]; sVrAnticlipOffset[2] = m[2];
+}
+
+float sm64_vr_anticlip_world_scale(void) { return sVrScale; }
+
 static float sVrEyeVP[2][4][4];
 static float sVrHudVP[2][4][4];
 static volatile int sVrValid = 0;      // read by the ENGINE thread
@@ -346,6 +374,14 @@ static simd_float4x4 sm64_vr_placement(simd_float4x4 frozenHead, simd_float4x4 l
     simd_float3 pos = headPos + fwd * sVrDist;
     pos.y += sVrHeight;
 
+    // The collision anti-clip's answer from the previous frame, in the anchor's
+    // own axes (it was computed in game-camera space, which is what this frame
+    // maps FROM).
+    simd_float3 right = simd_normalize(simd_cross(simd_make_float3(0, 1, 0), -fwd));
+    pos += right * sVrAnticlipOffset[0];
+    pos.y += sVrAnticlipOffset[1];
+    pos += fwd * (-sVrAnticlipOffset[2]);
+
     // ANTI-CLIP (charter R2, donor vr.c:288/519). Keep the anchor at least
     // kVrClipMargin from your ACTUAL head, and push it away along the line
     // between you when you get closer — so leaning in to look at the diorama
@@ -429,7 +465,20 @@ static void sm64_vr_build_matrices(cp_drawable_t drawable, simd_float4x4 frozenH
     const float invS = 1.0f / sVrScale;
     simd_float4x4 scale = matrix_identity_float4x4;
     scale.columns[0].x = invS; scale.columns[1].y = invS; scale.columns[2].z = invS;
-    simd_float4x4 A = simd_mul(sm64_vr_placement(frozenHead, liveHead), scale);
+    simd_float4x4 place = sm64_vr_placement(frozenHead, liveHead);
+    simd_float4x4 A = simd_mul(place, scale);
+
+    // The cyclopean eye in GAME-CAMERA space, for the engine's collision pass:
+    // invert the placement to get from the room back into the game's camera
+    // frame, then out of metres into world units.
+    {
+        simd_float4 headLocal = simd_mul(simd_inverse(place),
+                                         simd_make_float4(liveHead.columns[3].xyz, 1.0f));
+        sVrHeadCamPos[0] = headLocal.x * sVrScale;
+        sVrHeadCamPos[1] = headLocal.y * sVrScale;
+        sVrHeadCamPos[2] = headLocal.z * sVrScale;
+        sVrHeadCamValid = 1;
+    }
 
     // Clip planes in METRES (A has already taken game units out). Near 0.05 is
     // the donor's decal z-fight lesson; far tracks the world's scaled size.
@@ -491,9 +540,14 @@ static void sm64_vr_build_matrices(cp_drawable_t drawable, simd_float4x4 frozenH
         // point: a quad at a real distance from the head gives both eyes the
         // disparity that distance deserves, where the old pass-through gave the
         // 2D layer zero TEXTURE disparity and therefore a huge ANGULAR one.
+        // The donor's ledger entry, avoided rather than re-earned: their VR panel
+        // rendered at HALF the size of every other menu because it rode the
+        // gameplay HUD quad. A menu over the world gets menu-sized.
+        float hudW = sVrMenuOverWorld ? (kVrHudHalfW * 1.9f) : kVrHudHalfW;
+        float hudH = sVrMenuOverWorld ? (kVrHudHalfH * 1.9f) : kVrHudHalfH;
         simd_float4x4 plane = (simd_float4x4){{ {0,0,0,0}, {0,0,0,0}, {0,0,0,0}, {0,0,0,0} }};
-        plane.columns[0].x = kVrHudHalfW;   // ndc.x -> metres across the plane
-        plane.columns[1].y = kVrHudHalfH;   // ndc.y -> metres up the plane
+        plane.columns[0].x = hudW;          // ndc.x -> metres across the plane
+        plane.columns[1].y = hudH;          // ndc.y -> metres up the plane
         plane.columns[3].z = -kVrHudDist;   // the plane's distance, ndc.z discarded
         plane.columns[3].w = 1.0f;
         simd_float4x4 eyeFromDevice = simd_inverse(deviceFromEye);

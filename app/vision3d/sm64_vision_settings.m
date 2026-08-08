@@ -102,6 +102,9 @@ static NSString *sm64_value_text(NSString *key, float v) {
     if ([key isEqualToString:@"vrStereo"]) {
         return [NSString stringWithFormat:@"%.0f%% IPD", v * 100.0f];
     }
+    if ([key isEqualToString:@"vrMsaa"]) {
+        return (v < 1.5f) ? @"Off" : [NSString stringWithFormat:@"%.0fx", v];
+    }
     if ([key isEqualToString:@"vrRender"]) {
         // Report the real texture, not the slider: "measure, don't infer".
         int rw = 0, rh = 0;
@@ -163,6 +166,11 @@ static __weak SM64SettingsVC *g_settingsVC = nil;
         mkrow(@"Units", @"units", SM64_ROW_SEG, 0, 1, SM64_DEF_UNITS),
         mkrow(@"Recenter Screen", @"recenter", SM64_ROW_BUTTON, 0, 0, 0),
     ], @[
+        // PARITY with the in-game panel (Austin, 2026-08-08: "I am leaning that we
+        // just exactly replicate each other"). Same store, same rows, either
+        // menu — the only difference is where you happen to be standing.
+        mkrow(@"VR Mode", @"vrPreset", SM64_ROW_SEG, 0, 1, 0),
+        mkrow(@"Antialiasing", @"vrMsaa", SM64_ROW_SLIDER, 1, 8, SM64_DEF_VRMSAA),
         // R0 SPIKE (throwaway). Stereo Strength is a COMFORT lever, not a fix for
         // doubling — 2026-08-07's device round settled that (0% doubled WORSE,
         // which is impossible when each eye's frustum matches its rotation). It
@@ -236,7 +244,11 @@ static __weak SM64SettingsVC *g_settingsVC = nil;
         return c;
     }
     if (r.type == SM64_ROW_SEG) {
-        UISegmentedControl *seg = [[UISegmentedControl alloc] initWithItems:@[ @"m", @"ft" ]];
+        NSArray *items = [r.key isEqualToString:@"vrPreset"]
+            ? @[ [NSString stringWithUTF8String:sm64_vr_preset_name(0)],
+                 [NSString stringWithUTF8String:sm64_vr_preset_name(1)] ]
+            : @[ @"m", @"ft" ];
+        UISegmentedControl *seg = [[UISegmentedControl alloc] initWithItems:items];
         seg.selectedSegmentIndex = v > 0.5f ? 1 : 0;
         tag_ctl(seg, r);
         [seg addTarget:self action:@selector(segChanged:) forControlEvents:UIControlEventValueChanged];
@@ -322,7 +334,15 @@ static __weak SM64SettingsVC *g_settingsVC = nil;
 }
 
 - (void)segChanged:(UISegmentedControl *)seg {
-    sm64_3d_setting_set_f(ctl_row(seg).key.UTF8String, seg.selectedSegmentIndex > 0 ? 1.0f : 0.0f);
+    SM64Row *r = ctl_row(seg);
+    if ([r.key isEqualToString:@"vrPreset"]) {
+        // Switching modes loads that mode's own placement, so the rows below
+        // have to be re-read — same reason the in-game panel re-pulls.
+        sm64_vr_preset_apply((int)seg.selectedSegmentIndex);
+        [self.tableView reloadData];
+        return;
+    }
+    sm64_3d_setting_set_f(r.key.UTF8String, seg.selectedSegmentIndex > 0 ? 1.0f : 0.0f);
     [self.tableView reloadData]; // every value label changes with the units
 }
 

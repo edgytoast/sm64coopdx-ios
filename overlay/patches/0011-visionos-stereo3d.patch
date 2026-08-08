@@ -432,7 +432,7 @@ WHAT IS NOT TOUCHED
 +#endif // SM64_VISION_HOST_H
 --- /dev/null
 +++ b/src/pc/vision3d/sm64_vision_host.m
-@@ -0,0 +1,687 @@
+@@ -0,0 +1,688 @@
 +// sm64_vision_host.m — boots the SDL/coopdx engine under the SwiftUI app entry
 +// (visionOS only) and owns the 2D<->3D transition sequencing.
 +//
@@ -729,7 +729,8 @@ WHAT IS NOT TOUCHED
 +    // game loop's thread), so the compositor never reads game state.
 +    if (sm64_vr_spike_variant != 0) {
 +        sm64_vr_spike_set_panel_mode(sm64_vr_frame_is_nongameplay() ? 1 : 0);
-+        sm64_vr_poll_hotkeys();   // d-pad up cycles the view mode
++        sm64_vr_poll_hotkeys();     // d-pad up cycles the view mode
++        sm64_vr_anticlip_resolve(); // level collision keeps the view out of walls
 +    }
 +
 +    // R0 SPIKE (throwaway): arm the console bridge on the DEVICE. The bridge is
@@ -2098,7 +2099,7 @@ WHAT IS NOT TOUCHED
 +#endif // SM64_VISION_3D
 --- /dev/null
 +++ b/src/pc/vision3d/sm64_vision_settings.m
-@@ -0,0 +1,365 @@
+@@ -0,0 +1,385 @@
 +// sm64_vision_settings.m — the "Vision Pro 3D" settings table.
 +//
 +// Ported from vkQuake-ios ios/shell/ios_settings.m's "Vision Pro 3D" section,
@@ -2203,6 +2204,9 @@ WHAT IS NOT TOUCHED
 +    if ([key isEqualToString:@"vrStereo"]) {
 +        return [NSString stringWithFormat:@"%.0f%% IPD", v * 100.0f];
 +    }
++    if ([key isEqualToString:@"vrMsaa"]) {
++        return (v < 1.5f) ? @"Off" : [NSString stringWithFormat:@"%.0fx", v];
++    }
 +    if ([key isEqualToString:@"vrRender"]) {
 +        // Report the real texture, not the slider: "measure, don't infer".
 +        int rw = 0, rh = 0;
@@ -2264,6 +2268,11 @@ WHAT IS NOT TOUCHED
 +        mkrow(@"Units", @"units", SM64_ROW_SEG, 0, 1, SM64_DEF_UNITS),
 +        mkrow(@"Recenter Screen", @"recenter", SM64_ROW_BUTTON, 0, 0, 0),
 +    ], @[
++        // PARITY with the in-game panel (Austin, 2026-08-08: "I am leaning that we
++        // just exactly replicate each other"). Same store, same rows, either
++        // menu — the only difference is where you happen to be standing.
++        mkrow(@"VR Mode", @"vrPreset", SM64_ROW_SEG, 0, 1, 0),
++        mkrow(@"Antialiasing", @"vrMsaa", SM64_ROW_SLIDER, 1, 8, SM64_DEF_VRMSAA),
 +        // R0 SPIKE (throwaway). Stereo Strength is a COMFORT lever, not a fix for
 +        // doubling — 2026-08-07's device round settled that (0% doubled WORSE,
 +        // which is impossible when each eye's frustum matches its rotation). It
@@ -2337,7 +2346,11 @@ WHAT IS NOT TOUCHED
 +        return c;
 +    }
 +    if (r.type == SM64_ROW_SEG) {
-+        UISegmentedControl *seg = [[UISegmentedControl alloc] initWithItems:@[ @"m", @"ft" ]];
++        NSArray *items = [r.key isEqualToString:@"vrPreset"]
++            ? @[ [NSString stringWithUTF8String:sm64_vr_preset_name(0)],
++                 [NSString stringWithUTF8String:sm64_vr_preset_name(1)] ]
++            : @[ @"m", @"ft" ];
++        UISegmentedControl *seg = [[UISegmentedControl alloc] initWithItems:items];
 +        seg.selectedSegmentIndex = v > 0.5f ? 1 : 0;
 +        tag_ctl(seg, r);
 +        [seg addTarget:self action:@selector(segChanged:) forControlEvents:UIControlEventValueChanged];
@@ -2423,7 +2436,15 @@ WHAT IS NOT TOUCHED
 +}
 +
 +- (void)segChanged:(UISegmentedControl *)seg {
-+    sm64_3d_setting_set_f(ctl_row(seg).key.UTF8String, seg.selectedSegmentIndex > 0 ? 1.0f : 0.0f);
++    SM64Row *r = ctl_row(seg);
++    if ([r.key isEqualToString:@"vrPreset"]) {
++        // Switching modes loads that mode's own placement, so the rows below
++        // have to be re-read — same reason the in-game panel re-pulls.
++        sm64_vr_preset_apply((int)seg.selectedSegmentIndex);
++        [self.tableView reloadData];
++        return;
++    }
++    sm64_3d_setting_set_f(r.key.UTF8String, seg.selectedSegmentIndex > 0 ? 1.0f : 0.0f);
 +    [self.tableView reloadData]; // every value label changes with the units
 +}
 +
@@ -2854,7 +2875,7 @@ WHAT IS NOT TOUCHED
 +}
 --- /dev/null
 +++ b/src/pc/vision3d/sm64_vr_spike.h
-@@ -0,0 +1,117 @@
+@@ -0,0 +1,133 @@
 +#ifndef SM64_VR_SPIKE_H
 +#define SM64_VR_SPIKE_H
 +
@@ -2957,6 +2978,22 @@ WHAT IS NOT TOUCHED
 +// Engine thread only — it reads the game's controller state.
 +void sm64_vr_poll_hotkeys(void);
 +
++// The VR options panel stays in the stereo world so its sliders can be judged
++// against the thing they change; the menu rides an enlarged HUD plane.
++void sm64_vr_spike_set_menu_over_world(int on);
++int  sm64_vr_spike_menu_over_world(void);
++
++// Anti-clip handoff (charter R2). The loop publishes the cyclopean eye in
++// game-camera space; sm64_vr_anticlip_resolve (engine thread) runs the level's
++// collision on it and hands back an anchor offset in metres.
++bool  sm64_vr_anticlip_get_head_campos(float out[3]);
++void  sm64_vr_anticlip_set_offset(const float m[3]);
++float sm64_vr_anticlip_world_scale(void);
++void  sm64_vr_anticlip_resolve(void);
++
++// The act/star selector, stamped by star_select.c (see sm64_vr_gamestate.c).
++extern int gVrActSelectorFrames;
++
 +// The VR eye-texture size, so gfx_metal and gfx_pc can both size from the VIEW
 +// instead of the flat panel's budget. Returns 0 when VR is not driving.
 +int sm64_vr_spike_render_size(int *w, int *h);
@@ -2974,7 +3011,7 @@ WHAT IS NOT TOUCHED
 +#endif // SM64_VR_SPIKE_H
 --- /dev/null
 +++ b/src/pc/vision3d/sm64_vr_spike.m
-@@ -0,0 +1,1074 @@
+@@ -0,0 +1,1128 @@
 +// sm64_vr_spike.m — R0 SPIKE, THROWAWAY. See sm64_vr_spike.h for the question
 +// this exists to answer (VR-CHARTER §5 R0.1 / A7).
 +//
@@ -3051,6 +3088,34 @@ WHAT IS NOT TOUCHED
 +// draws that frame on a world-locked screen). Declared here because the eye
 +// sizer above needs it too — a menu renders at a screen's shape, not a view's.
 +static volatile int sVrPanelMode = 0;
++
++// While the VR options panel itself is open we deliberately STAY in the stereo
++// world (donor: djui_panel_is_vr_panel). Every slider in it describes the world,
++// and you cannot judge a world you have just replaced with a menu screen. The
++// menu rides the HUD plane instead — enlarged, because the donor's ledger has a
++// whole entry about the VR panel rendering half-size on the gameplay HUD quad.
++static volatile int sVrMenuOverWorld = 0;
++void sm64_vr_spike_set_menu_over_world(int on) { sVrMenuOverWorld = on ? 1 : 0; }
++int  sm64_vr_spike_menu_over_world(void) { return sVrMenuOverWorld; }
++
++// Anti-clip handoff (charter R2). The loop publishes the cyclopean eye in
++// game-camera space; the engine thread runs level collision on it and writes back
++// an anchor offset in metres, which the next frame's placement applies.
++static float sVrHeadCamPos[3] = { 0.0f, 0.0f, 0.0f };
++static volatile int sVrHeadCamValid = 0;
++static float sVrAnticlipOffset[3] = { 0.0f, 0.0f, 0.0f };
++
++bool sm64_vr_anticlip_get_head_campos(float out[3]) {
++    if (!sVrHeadCamValid || sVrPanelMode) { return false; }
++    out[0] = sVrHeadCamPos[0]; out[1] = sVrHeadCamPos[1]; out[2] = sVrHeadCamPos[2];
++    return true;
++}
++
++void sm64_vr_anticlip_set_offset(const float m[3]) {
++    sVrAnticlipOffset[0] = m[0]; sVrAnticlipOffset[1] = m[1]; sVrAnticlipOffset[2] = m[2];
++}
++
++float sm64_vr_anticlip_world_scale(void) { return sVrScale; }
 +
 +static float sVrEyeVP[2][4][4];
 +static float sVrHudVP[2][4][4];
@@ -3323,6 +3388,14 @@ WHAT IS NOT TOUCHED
 +    simd_float3 pos = headPos + fwd * sVrDist;
 +    pos.y += sVrHeight;
 +
++    // The collision anti-clip's answer from the previous frame, in the anchor's
++    // own axes (it was computed in game-camera space, which is what this frame
++    // maps FROM).
++    simd_float3 right = simd_normalize(simd_cross(simd_make_float3(0, 1, 0), -fwd));
++    pos += right * sVrAnticlipOffset[0];
++    pos.y += sVrAnticlipOffset[1];
++    pos += fwd * (-sVrAnticlipOffset[2]);
++
 +    // ANTI-CLIP (charter R2, donor vr.c:288/519). Keep the anchor at least
 +    // kVrClipMargin from your ACTUAL head, and push it away along the line
 +    // between you when you get closer — so leaning in to look at the diorama
@@ -3406,7 +3479,20 @@ WHAT IS NOT TOUCHED
 +    const float invS = 1.0f / sVrScale;
 +    simd_float4x4 scale = matrix_identity_float4x4;
 +    scale.columns[0].x = invS; scale.columns[1].y = invS; scale.columns[2].z = invS;
-+    simd_float4x4 A = simd_mul(sm64_vr_placement(frozenHead, liveHead), scale);
++    simd_float4x4 place = sm64_vr_placement(frozenHead, liveHead);
++    simd_float4x4 A = simd_mul(place, scale);
++
++    // The cyclopean eye in GAME-CAMERA space, for the engine's collision pass:
++    // invert the placement to get from the room back into the game's camera
++    // frame, then out of metres into world units.
++    {
++        simd_float4 headLocal = simd_mul(simd_inverse(place),
++                                         simd_make_float4(liveHead.columns[3].xyz, 1.0f));
++        sVrHeadCamPos[0] = headLocal.x * sVrScale;
++        sVrHeadCamPos[1] = headLocal.y * sVrScale;
++        sVrHeadCamPos[2] = headLocal.z * sVrScale;
++        sVrHeadCamValid = 1;
++    }
 +
 +    // Clip planes in METRES (A has already taken game units out). Near 0.05 is
 +    // the donor's decal z-fight lesson; far tracks the world's scaled size.
@@ -3468,9 +3554,14 @@ WHAT IS NOT TOUCHED
 +        // point: a quad at a real distance from the head gives both eyes the
 +        // disparity that distance deserves, where the old pass-through gave the
 +        // 2D layer zero TEXTURE disparity and therefore a huge ANGULAR one.
++        // The donor's ledger entry, avoided rather than re-earned: their VR panel
++        // rendered at HALF the size of every other menu because it rode the
++        // gameplay HUD quad. A menu over the world gets menu-sized.
++        float hudW = sVrMenuOverWorld ? (kVrHudHalfW * 1.9f) : kVrHudHalfW;
++        float hudH = sVrMenuOverWorld ? (kVrHudHalfH * 1.9f) : kVrHudHalfH;
 +        simd_float4x4 plane = (simd_float4x4){{ {0,0,0,0}, {0,0,0,0}, {0,0,0,0}, {0,0,0,0} }};
-+        plane.columns[0].x = kVrHudHalfW;   // ndc.x -> metres across the plane
-+        plane.columns[1].y = kVrHudHalfH;   // ndc.y -> metres up the plane
++        plane.columns[0].x = hudW;          // ndc.x -> metres across the plane
++        plane.columns[1].y = hudH;          // ndc.y -> metres up the plane
 +        plane.columns[3].z = -kVrHudDist;   // the plane's distance, ndc.z discarded
 +        plane.columns[3].w = 1.0f;
 +        simd_float4x4 eyeFromDevice = simd_inverse(deviceFromEye);
@@ -4084,7 +4175,7 @@ WHAT IS NOT TOUCHED
 +#endif // DJUI_PANEL_VR_H
 --- /dev/null
 +++ b/src/pc/vision3d/djui_panel_vr.c
-@@ -0,0 +1,152 @@
+@@ -0,0 +1,162 @@
 +// djui_panel_vr.c — the in-game VR options panel (Options -> VR).
 +//
 +// See djui_panel_vr.h for why this exists and what belongs here rather than in
@@ -4194,6 +4285,14 @@ WHAT IS NOT TOUCHED
 +    // would mean using `caller` after its own panel was freed.
 +}
 +
++// While THIS panel is open the world stays in stereo behind it, so every slider
++// can be judged against the thing it changes. DJUI tells us when the panel goes
++// away through on_panel_destroy, which is the only reliable end-of-life signal —
++// Back, Escape and a panel-stack unwind all route through it.
++static void vr_panel_destroyed(UNUSED struct DjuiBase *caller) {
++    sm64_vr_spike_set_menu_over_world(0);
++}
++
 +void djui_panel_vr_create(struct DjuiBase *caller) {
 +    vr_panel_pull();
 +
@@ -4233,13 +4332,15 @@ WHAT IS NOT TOUCHED
 +        djui_button_create(body, DLANG(MENU, BACK), DJUI_BUTTON_STYLE_BACK, djui_panel_menu_back);
 +    }
 +
-+    djui_panel_add(caller, panel, NULL);
++    struct DjuiPanel *added = djui_panel_add(caller, panel, NULL);
++    if (added != NULL) { added->on_panel_destroy = vr_panel_destroyed; }
++    sm64_vr_spike_set_menu_over_world(1);
 +}
 +
 +#endif // SM64_VISION_3D
 --- /dev/null
 +++ b/src/pc/vision3d/sm64_vr_gamestate.c
-@@ -0,0 +1,60 @@
+@@ -0,0 +1,167 @@
 +// sm64_vr_gamestate.c — "is this frame a menu?", answered from the game's own
 +// state machine (charter A5, ported from the donor's vr_frame_is_nongameplay,
 +// pc_main.c:274-305).
@@ -4271,15 +4372,31 @@ WHAT IS NOT TOUCHED
 +#include "game/ingame_menu.h"      // gMenuMode
 +#include "game/level_update.h"     // gCurrCreditsEntry
 +#include "game/game_init.h"        // gCurrDemoInput
-+#include "pc/vision3d/sm64_vr_spike.h"  // sm64_vr_preset_cycle
++#include "pc/vision3d/sm64_vr_spike.h"  // sm64_vr_preset_cycle, anti-clip
++#include "game/camera.h"           // gCamera
++#include "engine/math_util.h"      // mtxf_inverse_non_affine
++#include "engine/surface_collision.h"
++#include "game/object_list_processor.h"  // gCheckingSurfaceCollisionsForCamera
++#include <string.h>
++
++// The act/star selector (charter A5's hybrid case). It renders 3D star models
++// behind 2D text, so no draw-order heuristic classifies it correctly — the donor
++// added a game-side flag for exactly this and so do we. star_select.c stamps a
++// few frames of grace each time its update runs, which also covers the moment
++// either side of the load where it is still on screen.
++int gVrActSelectorFrames = 0;
 +
 +bool sm64_vr_frame_is_nongameplay(void) {
++    if (gVrActSelectorFrames > 0) { gVrActSelectorFrames--; return true; }
 +    // A door / level transition is a 2D fullscreen effect. In the stereo world
 +    // it would only cover the middle of your view; on the panel it fills the
 +    // screen the way it is meant to.
 +    if (gWarpTransition.isActive)  { return true; }
 +    if (gDjuiInMainMenu)           { return true; }  // title / main menu / connect / options
-+    if (djui_panel_is_active())    { return true; }  // in-game menus, including the VR panel
++    // The VR panel is the ONE menu that stays in the world: its sliders describe
++    // the world, and you cannot judge a world you just replaced with a menu.
++    if (sm64_vr_spike_menu_over_world()) { return false; }
++    if (djui_panel_is_active())    { return true; }  // every other in-game menu
 +    if (gCurrCreditsEntry != NULL) { return true; }  // credits / ending
 +    if (gCurrDemoInput != NULL)    { return true; }  // attract-mode demo
 +    if (gMenuMode != -1)           { return true; }  // pause star grid / course complete
@@ -4299,10 +4416,101 @@ WHAT IS NOT TOUCHED
 +    sPrevDpadUp = up;
 +}
 +
++// ---------------------------------------------------------------------------
++// ANTI-CLIP, the collision half (charter R2, donor pc_main.c:313-405).
++//
++// The geometric standoff in the loop keeps the world off your FACE. This keeps
++// your viewpoint out of the world's GEOMETRY: the VR side hands us the cyclopean
++// eye in game-camera space, we convert it to world units through the renderer's
++// camera matrix, run the level's own floor/ceiling/wall collision on it, and
++// hand back the offset (in metres) that nudges the whole shrunk world off
++// whatever the eye was inside. One frame of latency by construction — the offset
++// we compute now is applied to the next frame's anchor — which is why it is
++// eased rather than applied raw.
++//
++// Runs on the ENGINE thread (the frame poll), because level collision is engine
++// state and the compositor thread must never touch it.
++void sm64_vr_anticlip_resolve(void) {
++    static float applied[3] = { 0.0f, 0.0f, 0.0f };
++    float target[3] = { 0.0f, 0.0f, 0.0f };
++    float camPos[3];
++    bool active = sm64_vr_anticlip_get_head_campos(camPos) && (gCamera != NULL);
++
++    if (active) {
++        Mat4 inv;
++        if (mtxf_inverse_non_affine(inv, gCamera->mtx)) {
++            // camera space (row vector) -> world
++            float wx = camPos[0]*inv[0][0] + camPos[1]*inv[1][0] + camPos[2]*inv[2][0] + inv[3][0];
++            float wy = camPos[0]*inv[0][1] + camPos[1]*inv[1][1] + camPos[2]*inv[2][1] + inv[3][1];
++            float wz = camPos[0]*inv[0][2] + camPos[1]*inv[1][2] + camPos[2]*inv[2][2] + inv[3][2];
++            // find_floor casts to s16 internally; keep it in range.
++            if (wx < -30000.0f) { wx = -30000.0f; } else if (wx > 30000.0f) { wx = 30000.0f; }
++            if (wz < -30000.0f) { wz = -30000.0f; } else if (wz > 30000.0f) { wz = 30000.0f; }
++
++            float scale = sm64_vr_anticlip_world_scale();
++            float marginWU = 0.10f * scale;   // a 10 cm physical standoff, in world units
++
++            float cwx = wx, cwy = wy, cwz = wz;
++            gCheckingSurfaceCollisionsForCamera = TRUE;
++
++            struct Surface *floor = NULL, *ceil = NULL;
++            float fY = find_floor(cwx, cwy, cwz, &floor);
++            float cY = find_ceil(cwx, cwy, cwz, &ceil);
++            bool haveFloor = (floor != NULL) && (fY > -10000.0f);
++            bool haveCeil  = (ceil  != NULL) && (cY <  19000.0f);
++            if (haveFloor && cwy < fY + marginWU) { cwy = fY + marginWU; }
++            if (haveCeil  && cwy > cY - marginWU) { cwy = cY - marginWU; }
++            if (haveFloor && haveCeil && fY + marginWU > cY - marginWU) { cwy = 0.5f * (fY + cY); }
++
++            struct WallCollisionData wcd;
++            memset(&wcd, 0, sizeof(wcd));
++            wcd.x = cwx; wcd.y = cwy; wcd.z = cwz; wcd.offsetY = 0.0f; wcd.radius = marginWU;
++            find_wall_collisions(&wcd);
++            cwx = wcd.x; cwz = wcd.z;
++
++            // A wall push can slide us over a step — re-clamp the floor once.
++            fY = find_floor(cwx, cwy, cwz, &floor);
++            if (floor != NULL && fY > -10000.0f && cwy < fY + marginWU) { cwy = fY + marginWU; }
++
++            gCheckingSurfaceCollisionsForCamera = FALSE;
++
++            float dwx = cwx - wx, dwy = cwy - wy, dwz = cwz - wz;
++            // world delta -> camera space (rotation rows only) -> metres, negated:
++            // move the WORLD opposite to the eye pushout, so the fixed head ends
++            // up outside the geometry.
++            float dcx = dwx*gCamera->mtx[0][0] + dwy*gCamera->mtx[1][0] + dwz*gCamera->mtx[2][0];
++            float dcy = dwx*gCamera->mtx[0][1] + dwy*gCamera->mtx[1][1] + dwz*gCamera->mtx[2][1];
++            float dcz = dwx*gCamera->mtx[0][2] + dwy*gCamera->mtx[1][2] + dwz*gCamera->mtx[2][2];
++            float invScale = 1.0f / scale;
++            target[0] = -dcx * invScale;
++            target[1] = -dcy * invScale;
++            target[2] = -dcz * invScale;
++        } else {
++            active = false;
++        }
++    }
++
++    // Escape geometry FAST so a quick camera move cannot dip the view through a
++    // floor before the correction catches up; relax back slowly so the world
++    // never lurches. "Escaping" = the correction is growing.
++    for (int i = 0; i < 3; i++) {
++        float d = target[i] - applied[i];
++        float at = (target[i]  < 0.0f) ? -target[i]  : target[i];
++        float aa = (applied[i] < 0.0f) ? -applied[i] : applied[i];
++        float maxStep = !active ? 0.04f : ((at > aa) ? 0.10f : 0.02f);
++        if (d >  maxStep) { d =  maxStep; }
++        if (d < -maxStep) { d = -maxStep; }
++        applied[i] += d;
++        if (applied[i] >  0.80f) { applied[i] =  0.80f; }
++        if (applied[i] < -0.80f) { applied[i] = -0.80f; }
++    }
++    sm64_vr_anticlip_set_offset(applied);
++}
++
 +#endif // SM64_VISION_3D
 --- /dev/null
 +++ b/src/pc/vision3d/sm64_vr_presets.c
-@@ -0,0 +1,107 @@
+@@ -0,0 +1,116 @@
 +// sm64_vr_presets.c — VR view modes (charter R2, donor vr.c:1493-1556).
 +//
 +// A "mode" is just a remembered set of placement numbers, and the donor's design
@@ -4335,9 +4543,18 @@ WHAT IS NOT TOUCHED
 +// Stock table. Diorama is ours, tuned on device; Third-person follows the
 +// donor's shape — a bigger world whose camera sits essentially AT you, so the
 +// level is around you rather than on a table in front of you.
++// Austin, 2026-08-08: "the difference between diorama and 3rd person feels more
++// like how zoomed in you are. is that right?" — it was, and that is the honest
++// answer for any mode short of first-person: what changes is the world's SIZE
++// and where you stand in it. So the two are now pulled far enough apart to be
++// two places rather than two zoom levels:
++//   Diorama      a ~3.6 m world, in front of you and well below eye level —
++//                something on a table that you look DOWN at.
++//   Third-person a ~9 m world with the game's camera essentially AT you, so the
++//                level is around you and Mario is a foot tall.
 +static const SM64VrPreset sPresets[] = {
-+    { "Diorama",      1376.0f,  0.60f, -0.35f },
-+    { "Third-person", 1200.0f, -0.10f,  0.00f },
++    { "Diorama",      2200.0f,  0.55f, -0.60f },
++    { "Third-person",  900.0f, -0.15f, -0.10f },
 +};
 +#define SM64_VR_PRESET_COUNT ((int)(sizeof(sPresets) / sizeof(sPresets[0])))
 +
@@ -4735,6 +4952,28 @@ WHAT IS NOT TOUCHED
          case G_TEXCLIP_DJUI:
              djui_gfx_dp_set_clipping(C0(16, 8), C0(8, 8), C1(16, 8), C1(8, 8));
              break;
+--- a/src/menu/star_select.c
++++ b/src/menu/star_select.c
+@@ -20,6 +20,7 @@
+ #include "game/rumble_init.h"
+ #include "sm64.h"
+ #include "star_select.h"
++#include "pc/vision3d/sm64_vision_3d.h"
+ #include "prevent_bss_reordering.h"
+ #include "pc/network/network.h"
+ #include "pc/lua/utils/smlua_misc_utils.h"
+@@ -458,6 +459,11 @@
+  * Also updates objects and returns act number selected after is chosen.
+  */
+ s32 lvl_update_obj_and_load_act_button_actions(UNUSED s32 arg, UNUSED s32 unused) {
++#ifdef SM64_VISION_3D
++    // visionOS VR: present this screen flat, like every other menu.
++    extern int gVrActSelectorFrames;
++    gVrActSelectorFrames = 4;
++#endif
+     if (sActSelectorMenuTimer >= 11) {
+         // If any of these buttons are pressed, play sound and go to course act
+ #ifndef VERSION_EU
 --- a/src/pc/djui/djui_panel_options.c
 +++ b/src/pc/djui/djui_panel_options.c
 @@ -8,6 +8,9 @@

@@ -79,6 +79,8 @@ function(_sm64_vision3d_wire)
         ${GAME_ROOT}/src/pc/vision3d/sm64_vr_spike.m
         # Charter R3: the Sense-controller backend (GameController + ARKit).
         ${GAME_ROOT}/src/pc/vision3d/controller_vision.m
+        # Charter R4: accessory poses, so first-person can draw your hands.
+        ${GAME_ROOT}/src/pc/vision3d/sm64_vr_hands.m
     )
     # -fobjc-arc is MANDATORY, and its absence is not a compile error — it is a
     # crash days later. This tree does NOT enable ARC globally; overlay 0005

@@ -61,6 +61,7 @@
 #include "pc/controller/controller_api.h"
 #include "pc/vision3d/controller_vision.h"
 #include "pc/vision3d/sm64_vr_spike.h"   // mode cycle, recenter, grab gate, chat
+#include "pc/vision3d/sm64_vr_hands.h"   // accessory poses (a separate question from input)
 #include "pc/utils/misc.h"               // clock_elapsed_f64: tap vs hold
 
 // Assigned by chirality once ARKit answers. Weak-ish by convention: the connect
@@ -122,6 +123,15 @@ static void vr_adopt(GCController *c) {
     vr_log_inventory(c);
     sLoggedInventory = true;
 
+    // POSES ARE A SEPARATE QUESTION FROM INPUT, and this is the line that used to
+    // conflate them. Everything below this point is about who drives the N64 pad,
+    // and leaving an MFi-reporting pair to SDL is the right answer there. But
+    // ar_accessory_load_from_device takes a GCDevice, not a spatial controller,
+    // so a device that is "just a gamepad" for input may still be TRACKABLE — and
+    // sitting behind the spatial gate meant we had never once asked. Ask always;
+    // sm64_vr_hands.m logs whichever way it goes.
+    sm64_vr_hands_register_device((__bridge void *)c);
+
     if (!vr_is_spatial(c)) {
         // A normal gamepad: SDL already owns it, and taking it here would
         // double-feed the pad.
@@ -154,6 +164,7 @@ static void vr_adopt(GCController *c) {
 }
 
 static void vr_forget(GCController *c) {
+    sm64_vr_hands_forget_device((__bridge void *)c);
     for (int i = 0; i < 2; i++) {
         if (sHand[i] == c) {
             sHand[i] = nil;

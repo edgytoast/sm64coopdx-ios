@@ -107,6 +107,11 @@ bool        sm64_vr_first_person_active(void);
 int          sm64_vr_sky_dome_active(void);
 const float *sm64_vr_sky_viewproj(int eye);
 
+// Room -> game-camera space, 16 floats in simd column-major order. The transform
+// anything tracked in the ROOM needs before it can be drawn in the WORLD; the
+// hands are its only caller today. 0 when VR is not driving the frame.
+int sm64_vr_camera_from_world(float *out16);
+
 // D-pad up cycles the view mode without opening a menu (donor pc_main.c:497-503).
 // Engine thread only — it reads the game's controller state.
 void sm64_vr_poll_hotkeys(void);

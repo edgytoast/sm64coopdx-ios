@@ -20,6 +20,8 @@
 #import <ImageIO/ImageIO.h>
 #import <CoreGraphics/CoreGraphics.h>
 
+#include "pc/vision3d/sm64_vr_hands.h"   // controller poses, polled per frame
+
 volatile int sm64_vr_spike_stop = 0;
 volatile int sm64_vr_spike_running = 0;
 volatile int sm64_vr_spike_variant = 0;
@@ -106,6 +108,11 @@ float sm64_vr_anticlip_world_scale(void) { return sVrScale; }
 static float sVrEyeVP[2][4][4];
 static float sVrHudVP[2][4][4];
 static float sVrSkyVP[2][4][4];        // EyeVP with the translation column zeroed
+// Room -> game camera. Left zero-initialised rather than identity because
+// matrix_identity_float4x4 is not a compile-time constant in C; the validity flag
+// beside it is what any reader actually gates on.
+static simd_float4x4 sVrCamFromWorld;
+static volatile int  sVrCamFromWorldValid = 0;
 static volatile int sVrValid = 0;      // read by the ENGINE thread
 static int sVrWorld = 0;               // world mode on (vs the clear-only probe)
 
@@ -243,6 +250,15 @@ const float *sm64_vr_hud_matrix(int eye) {
 const float *sm64_vr_sky_viewproj(int eye) {
     if (!sVrValid || sVrPanelMode || eye < 1 || eye > 2) { return NULL; }
     return &sVrSkyVP[eye - 1][0][0];
+}
+
+// Room -> game-camera transform, for anything tracked in the room that has to be
+// drawn in the world. Sixteen plain floats in simd's column-major order, so the
+// header stays C and the caller memcpy's it back into a matrix.
+int sm64_vr_camera_from_world(float *out16) {
+    if (!sVrValid || sVrPanelMode || !sVrCamFromWorldValid || out16 == NULL) { return 0; }
+    memcpy(out16, &sVrCamFromWorld, sizeof(sVrCamFromWorld));
+    return 1;
 }
 
 int sm64_vr_hide_background(void) { return sVrWorld && !sVrPanelMode; }
@@ -507,6 +523,14 @@ static void sm64_vr_build_matrices(cp_drawable_t drawable, simd_float4x4 frozenH
     scale.columns[0].x = invS; scale.columns[1].y = invS; scale.columns[2].z = invS;
     simd_float4x4 place = sm64_vr_placement(frozenHead, liveHead);
     simd_float4x4 A = simd_mul(place, scale);
+
+    // A maps GAME-CAMERA space into the room; its inverse brings anything the
+    // room knows about — an ARKit accessory pose, say — back into the space the
+    // engine draws in. Published for the hands (sm64_vr_hands.m), which is the
+    // same trip the head makes below for the anti-clip, just with orientation
+    // kept as well as position.
+    sVrCamFromWorld = simd_inverse(A);
+    sVrCamFromWorldValid = 1;
 
     // The cyclopean eye in GAME-CAMERA space, for the engine's collision pass:
     // invert the placement to get from the room back into the game's camera
@@ -954,6 +978,13 @@ void sm64_vr_spike_run(void *layer_renderer_ptr, int variant) {
                 // you look at it — the donor's "tuned by feel" workflow.
                 sm64_vr_build_matrices(drawable, frozenHead, liveHead, false);
             }
+
+            // Controller poses, AFTER the matrices: the hands consume the
+            // camera-from-world transform those just published, so polling first
+            // would place this frame's hands with last frame's placement — a
+            // lag you would only notice while moving, which is exactly when you
+            // are looking at your hands.
+            sm64_vr_hands_poll();
 
             // THE POSE WE RENDER WITH MUST BE THE POSE WE SUBMIT (donor ledger:
             // "world shakes with head sway"). The engine renders its pair AFTER

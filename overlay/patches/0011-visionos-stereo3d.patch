@@ -2917,7 +2917,7 @@ WHAT IS NOT TOUCHED
 +}
 --- /dev/null
 +++ b/src/pc/vision3d/sm64_vr_spike.h
-@@ -0,0 +1,164 @@
+@@ -0,0 +1,169 @@
 +#ifndef SM64_VR_SPIKE_H
 +#define SM64_VR_SPIKE_H
 +
@@ -3027,6 +3027,11 @@ WHAT IS NOT TOUCHED
 +int          sm64_vr_sky_dome_active(void);
 +const float *sm64_vr_sky_viewproj(int eye);
 +
++// Room -> game-camera space, 16 floats in simd column-major order. The transform
++// anything tracked in the ROOM needs before it can be drawn in the WORLD; the
++// hands are its only caller today. 0 when VR is not driving the frame.
++int sm64_vr_camera_from_world(float *out16);
++
 +// D-pad up cycles the view mode without opening a menu (donor pc_main.c:497-503).
 +// Engine thread only — it reads the game's controller state.
 +void sm64_vr_poll_hotkeys(void);
@@ -3084,7 +3089,7 @@ WHAT IS NOT TOUCHED
 +#endif // SM64_VR_SPIKE_H
 --- /dev/null
 +++ b/src/pc/vision3d/sm64_vr_spike.m
-@@ -0,0 +1,1198 @@
+@@ -0,0 +1,1229 @@
 +// sm64_vr_spike.m — R0 SPIKE, THROWAWAY. See sm64_vr_spike.h for the question
 +// this exists to answer (VR-CHARTER §5 R0.1 / A7).
 +//
@@ -3106,6 +3111,8 @@ WHAT IS NOT TOUCHED
 +#import <Foundation/Foundation.h>
 +#import <ImageIO/ImageIO.h>
 +#import <CoreGraphics/CoreGraphics.h>
++
++#include "pc/vision3d/sm64_vr_hands.h"   // controller poses, polled per frame
 +
 +volatile int sm64_vr_spike_stop = 0;
 +volatile int sm64_vr_spike_running = 0;
@@ -3193,6 +3200,11 @@ WHAT IS NOT TOUCHED
 +static float sVrEyeVP[2][4][4];
 +static float sVrHudVP[2][4][4];
 +static float sVrSkyVP[2][4][4];        // EyeVP with the translation column zeroed
++// Room -> game camera. Left zero-initialised rather than identity because
++// matrix_identity_float4x4 is not a compile-time constant in C; the validity flag
++// beside it is what any reader actually gates on.
++static simd_float4x4 sVrCamFromWorld;
++static volatile int  sVrCamFromWorldValid = 0;
 +static volatile int sVrValid = 0;      // read by the ENGINE thread
 +static int sVrWorld = 0;               // world mode on (vs the clear-only probe)
 +
@@ -3330,6 +3342,15 @@ WHAT IS NOT TOUCHED
 +const float *sm64_vr_sky_viewproj(int eye) {
 +    if (!sVrValid || sVrPanelMode || eye < 1 || eye > 2) { return NULL; }
 +    return &sVrSkyVP[eye - 1][0][0];
++}
++
++// Room -> game-camera transform, for anything tracked in the room that has to be
++// drawn in the world. Sixteen plain floats in simd's column-major order, so the
++// header stays C and the caller memcpy's it back into a matrix.
++int sm64_vr_camera_from_world(float *out16) {
++    if (!sVrValid || sVrPanelMode || !sVrCamFromWorldValid || out16 == NULL) { return 0; }
++    memcpy(out16, &sVrCamFromWorld, sizeof(sVrCamFromWorld));
++    return 1;
 +}
 +
 +int sm64_vr_hide_background(void) { return sVrWorld && !sVrPanelMode; }
@@ -3594,6 +3615,14 @@ WHAT IS NOT TOUCHED
 +    scale.columns[0].x = invS; scale.columns[1].y = invS; scale.columns[2].z = invS;
 +    simd_float4x4 place = sm64_vr_placement(frozenHead, liveHead);
 +    simd_float4x4 A = simd_mul(place, scale);
++
++    // A maps GAME-CAMERA space into the room; its inverse brings anything the
++    // room knows about — an ARKit accessory pose, say — back into the space the
++    // engine draws in. Published for the hands (sm64_vr_hands.m), which is the
++    // same trip the head makes below for the anti-clip, just with orientation
++    // kept as well as position.
++    sVrCamFromWorld = simd_inverse(A);
++    sVrCamFromWorldValid = 1;
 +
 +    // The cyclopean eye in GAME-CAMERA space, for the engine's collision pass:
 +    // invert the placement to get from the room back into the game's camera
@@ -4041,6 +4070,13 @@ WHAT IS NOT TOUCHED
 +                // you look at it — the donor's "tuned by feel" workflow.
 +                sm64_vr_build_matrices(drawable, frozenHead, liveHead, false);
 +            }
++
++            // Controller poses, AFTER the matrices: the hands consume the
++            // camera-from-world transform those just published, so polling first
++            // would place this frame's hands with last frame's placement — a
++            // lag you would only notice while moving, which is exactly when you
++            // are looking at your hands.
++            sm64_vr_hands_poll();
 +
 +            // THE POSE WE RENDER WITH MUST BE THE POSE WE SUBMIT (donor ledger:
 +            // "world shakes with head sway"). The engine renders its pair AFTER
@@ -4947,7 +4983,7 @@ WHAT IS NOT TOUCHED
 +#endif // CONTROLLER_VISION_H
 --- /dev/null
 +++ b/src/pc/vision3d/controller_vision.m
-@@ -0,0 +1,316 @@
+@@ -0,0 +1,327 @@
 +// controller_vision.m — PSVR2 Sense controllers as an N64 pad (charter R3 / A10).
 +//
 +// A ControllerAPI backend registered beside controller_sdl, exactly as the donor
@@ -5011,6 +5047,7 @@ WHAT IS NOT TOUCHED
 +#include "pc/controller/controller_api.h"
 +#include "pc/vision3d/controller_vision.h"
 +#include "pc/vision3d/sm64_vr_spike.h"   // mode cycle, recenter, grab gate, chat
++#include "pc/vision3d/sm64_vr_hands.h"   // accessory poses (a separate question from input)
 +#include "pc/utils/misc.h"               // clock_elapsed_f64: tap vs hold
 +
 +// Assigned by chirality once ARKit answers. Weak-ish by convention: the connect
@@ -5072,6 +5109,15 @@ WHAT IS NOT TOUCHED
 +    vr_log_inventory(c);
 +    sLoggedInventory = true;
 +
++    // POSES ARE A SEPARATE QUESTION FROM INPUT, and this is the line that used to
++    // conflate them. Everything below this point is about who drives the N64 pad,
++    // and leaving an MFi-reporting pair to SDL is the right answer there. But
++    // ar_accessory_load_from_device takes a GCDevice, not a spatial controller,
++    // so a device that is "just a gamepad" for input may still be TRACKABLE — and
++    // sitting behind the spatial gate meant we had never once asked. Ask always;
++    // sm64_vr_hands.m logs whichever way it goes.
++    sm64_vr_hands_register_device((__bridge void *)c);
++
 +    if (!vr_is_spatial(c)) {
 +        // A normal gamepad: SDL already owns it, and taking it here would
 +        // double-feed the pad.
@@ -5104,6 +5150,7 @@ WHAT IS NOT TOUCHED
 +}
 +
 +static void vr_forget(GCController *c) {
++    sm64_vr_hands_forget_device((__bridge void *)c);
 +    for (int i = 0; i < 2; i++) {
 +        if (sHand[i] == c) {
 +            sHand[i] = nil;
@@ -5264,13 +5311,329 @@ WHAT IS NOT TOUCHED
 +};
 +
 +#endif // SM64_VISION_3D
+--- /dev/null
++++ b/src/pc/vision3d/sm64_vr_hands.h
+@@ -0,0 +1,44 @@
++// sm64_vr_hands.h — Mario's hands on your controllers (charter R4, Austin 2026-08-08).
++//
++// Pure C so gfx_pc.c can include it. The Objective-C / ARKit side lives in
++// sm64_vr_hands.m; see the header comment there for what this actually costs.
++
++#ifndef SM64_VR_HANDS_H
++#define SM64_VR_HANDS_H
++
++#define SM64_VR_HAND_LEFT  0
++#define SM64_VR_HAND_RIGHT 1
++
++// Registration from the controller backend. Takes a GCController as void* so
++// this header stays free of GameController. Registering a device that has no
++// trackable accessory is harmless — that IS the common case, and finding out is
++// the point (see the MFi note in sm64_vr_hands.m).
++void sm64_vr_hands_register_device(void *gcController);
++void sm64_vr_hands_forget_device(void *gcController);
++
++// Per-frame anchor poll. Compositor thread, called from the VR loop.
++void sm64_vr_hands_poll(void);
++
++// 1 while hands should be drawn: enabled, first-person, and at least one hand
++// actually tracked this frame.
++int sm64_vr_hands_active(void);
++
++// The hand's model->CAMERA matrix in fast3d row-vector form (the space our EyeVP
++// consumes). Returns 0 when that hand is not tracked, in which case nothing is
++// drawn for it. The matrix is the same for both eyes — the eye difference lives
++// entirely in EyeVP — so one display list serves both.
++int sm64_vr_hand_matrix(int hand, float out[4][4]);
++
++// Setting: "Show Mario Hands". Off means the poll still runs (so the log still
++// tells us whether poses exist) but nothing is drawn.
++void sm64_vr_hands_set_enabled(int on);
++int  sm64_vr_hands_get_enabled(void);
++
++// Hand size, as a multiplier on Mario's own hand geometry. 1.0 is Mario-sized,
++// which is life-sized in first-person because that is what the FP world scale
++// means. Exposed because "Mario-sized" and "your-hand-sized" are only the same
++// thing if the world scale is exactly right.
++void  sm64_vr_hands_set_scale(float s);
++float sm64_vr_hands_get_scale(void);
++
++#endif // SM64_VR_HANDS_H
+--- /dev/null
++++ b/src/pc/vision3d/sm64_vr_hands.m
+@@ -0,0 +1,267 @@
++// sm64_vr_hands.m — accessory poses, so Mario's hands can be YOUR hands.
++//
++// THE OPEN QUESTION THIS FILE EXISTS TO ANSWER. On this system the PSVR2 Sense
++// pair enumerates as ONE `MFi` gamepad, not as two GCProductCategorySpatial-
++// Controller devices (device log, 2026-08-08). controller_vision.m saw that and
++// took the correct decision for INPUT — leave the pair to SDL's normal binds —
++// but it also made the accessory-load call unreachable, because that call sat
++// behind the same spatial-category gate. So nobody has ever actually asked ARKit
++// whether it can track the thing.
++//
++// It is a fair question either way. ar_accessory_load_from_device takes a
++// GCDevice, not a spatial controller, and accessory tracking is documented in
++// terms of "accessories" rather than in terms of that product category; a
++// controller that reports as MFi for INPUT may still be trackable. Or it may
++// not, in which case there are no per-hand poses to be had and hands are dead on
++// this hardware. So the load is attempted on EVERY controller and the result is
++// logged loudly. One headset round answers it.
++//
++// WHAT WE DO WITH A POSE. ARKit gives origin-relative transforms in metres. The
++// engine wants model->CAMERA, because that is the space our EyeVP consumes
++// (gfx_stereo_projection composes MP = modelview * EyeVP). The chain is exactly
++// the head anti-clip's chain applied to a different point, so it is reused
++// rather than re-derived: A maps game-camera space to the room, so inverse(A)
++// maps the room back to game-camera space, and the hand's model matrix is
++// inverse(A) * accessoryPose.
++//
++// A SEPARATE ARKit SESSION, deliberately. The VR loop's session is created once,
++// at loop start, with the world-tracking provider — but accessories load
++// ASYNCHRONOUSLY and controllers connect and disconnect whenever they like, so
++// the set of accessories is simply not known at that moment. Running accessory
++// tracking on its own session sidesteps the ordering problem entirely and keeps
++// its failure modes off the world tracking that the whole VR mode depends on:
++// if this session never starts, the world is exactly as it was and only the
++// hands are missing.
++
++#import "sm64_vision_3d.h"
++
++#ifdef SM64_VISION_3D
++
++#import <Foundation/Foundation.h>
++#import <GameController/GameController.h>
++#import <ARKit/ARKit.h>
++#import <simd/simd.h>
++
++#include "pc/vision3d/sm64_vr_hands.h"
++#include "pc/vision3d/sm64_vr_spike.h"   // first-person gate, camera-from-world
++
++// ---------------------------------------------------------------------------
++// State. Written on whichever thread ARKit and GameController call us on, read
++// by the compositor thread's poll and the engine thread's matrix query. The
++// poses are plain float storage guarded by a validity flag published last, the
++// same discipline the rest of the VR state uses.
++// ---------------------------------------------------------------------------
++#define SM64_VR_MAX_ACCESSORIES 4
++
++API_AVAILABLE(visionos(26.0))
++static ar_accessory_t sAccessory[SM64_VR_MAX_ACCESSORIES];
++static GCController  *sAccessoryDevice[SM64_VR_MAX_ACCESSORIES];
++static int            sAccessoryCount = 0;
++
++API_AVAILABLE(visionos(26.0))
++static ar_accessory_tracking_provider_t sProvider = NULL;
++API_AVAILABLE(visionos(26.0))
++static ar_session_t sSession = NULL;
++static bool sProviderDirty = false;     // the accessory set changed; rebuild
++
++static simd_float4x4 sHandWorld[2];     // origin_from_anchor, metres
++static volatile int  sHandValid[2] = { 0, 0 };
++static int           sHandsEnabled = 1;
++static float         sHandScale = 1.0f;
++
++// Diagnostics: this is a feature whose first question is "does the hardware do
++// this at all", so the log is the deliverable of the first device round.
++static int sLoggedAnchors = 0;
++static int sPollCount = 0;
++
++// ---------------------------------------------------------------------------
++// Registration
++// ---------------------------------------------------------------------------
++void sm64_vr_hands_register_device(void *gcController) {
++    GCController *c = (__bridge GCController *)gcController;
++    if (c == nil) { return; }
++    if (@available(visionOS 26.0, *)) {
++        ar_accessory_load_from_device(c,
++            ^(id<GCDevice> device, bool successful, ar_error_t error, ar_accessory_t accessory) {
++                (void)device;
++                if (!successful || accessory == NULL) {
++                    // THE ANSWER, if it is no. Logged at the same volume as the
++                    // success case so a device round cannot be ambiguous about it.
++                    NSLog(@"[vrhands] accessory load FAILED for '%@' (category '%@') — "
++                           "no per-hand pose from this device%@",
++                          c.vendorName, c.productCategory,
++                          error ? @"" : @" (no error object)");
++                    return;
++                }
++                if (sAccessoryCount >= SM64_VR_MAX_ACCESSORIES) {
++                    NSLog(@"[vrhands] accessory table full — ignoring '%s'",
++                          ar_accessory_get_name(accessory));
++                    return;
++                }
++                ar_accessory_chirality_t ch = ar_accessory_get_inherent_chirality(accessory);
++                sAccessory[sAccessoryCount] = accessory;
++                sAccessoryDevice[sAccessoryCount] = c;
++                sAccessoryCount++;
++                sProviderDirty = true;
++                NSLog(@"[vrhands] accessory LOADED: '%s' chirality=%s from '%@' (category '%@') "
++                       "— %d accessory(s) known",
++                      ar_accessory_get_name(accessory),
++                      ch == ar_accessory_chirality_left  ? "left"
++                    : ch == ar_accessory_chirality_right ? "right" : "unspecified",
++                      c.vendorName, c.productCategory, sAccessoryCount);
++            });
++    }
++}
++
++void sm64_vr_hands_forget_device(void *gcController) {
++    GCController *c = (__bridge GCController *)gcController;
++    if (c == nil) { return; }
++    for (int i = 0; i < sAccessoryCount; i++) {
++        if (sAccessoryDevice[i] != c) { continue; }
++        for (int j = i; j < sAccessoryCount - 1; j++) {
++            sAccessory[j] = sAccessory[j + 1];
++            sAccessoryDevice[j] = sAccessoryDevice[j + 1];
++        }
++        sAccessoryCount--;
++        sAccessory[sAccessoryCount] = NULL;
++        sAccessoryDevice[sAccessoryCount] = nil;
++        sProviderDirty = true;
++        // Drop the poses with the device, or a hand freezes mid-air where the
++        // controller was when it vanished — the donor's "release everything on
++        // focus loss" rule, applied to geometry instead of buttons.
++        sHandValid[0] = sHandValid[1] = 0;
++        NSLog(@"[vrhands] accessory device disconnected — %d left", sAccessoryCount);
++        return;
++    }
++}
++
++// ---------------------------------------------------------------------------
++// Provider lifecycle
++// ---------------------------------------------------------------------------
++API_AVAILABLE(visionos(26.0))
++static void sm64_vr_hands_rebuild_provider(void) {
++    sProviderDirty = false;
++    sProvider = NULL;
++    sSession = NULL;
++    sHandValid[0] = sHandValid[1] = 0;
++    if (sAccessoryCount == 0) { return; }
++
++    ar_accessories_t set = ar_accessories_create();
++    for (int i = 0; i < sAccessoryCount; i++) {
++        if (sAccessory[i] != NULL) { ar_accessories_add_accessory(set, sAccessory[i]); }
++    }
++    ar_accessory_tracking_configuration_t cfg = ar_accessory_tracking_configuration_create();
++    ar_accessory_tracking_configuration_set_accessories(cfg, set);
++
++    sProvider = ar_accessory_tracking_provider_create(cfg);
++    sSession  = ar_session_create();
++    ar_data_providers_t providers = ar_data_providers_create_with_data_providers(sProvider, NULL);
++    ar_session_run(sSession, providers);
++    NSLog(@"[vrhands] accessory tracking session running with %d accessory(s)", sAccessoryCount);
++}
++
++// ---------------------------------------------------------------------------
++// Per-frame poll
++// ---------------------------------------------------------------------------
++void sm64_vr_hands_poll(void) {
++    if (@available(visionOS 26.0, *)) {
++        if (sProviderDirty) { sm64_vr_hands_rebuild_provider(); }
++        if (sProvider == NULL) { return; }
++
++        ar_accessory_anchors_t anchors =
++            ar_accessory_tracking_provider_get_latest_anchors(sProvider);
++        if (anchors == NULL) { return; }
++
++        size_t n = ar_accessory_anchors_get_count(anchors);
++        // A bitmask rather than an array: a block cannot capture a C array, and
++        // two loose ints would need two __block slots to say one thing.
++        __block int seenMask = 0;
++        __block int logThis = 0;
++        // Log the first few polls and then every ~10 seconds at 90 Hz, so the
++        // log answers "did it ever work" and "is it still working" without
++        // drowning the device console.
++        if (sLoggedAnchors < 5 || (sPollCount % 900) == 0) { logThis = 1; sLoggedAnchors++; }
++        sPollCount++;
++        if (logThis) { NSLog(@"[vrhands] poll: %zu anchor(s)", n); }
++
++        ar_accessory_anchors_enumerate_anchors(anchors, ^bool(ar_accessory_anchor_t anchor) {
++            bool tracked = ar_accessory_anchor_is_tracked(anchor);
++            ar_accessory_chirality_t ch = ar_accessory_anchor_get_held_chirality(anchor);
++            simd_float4x4 xf = ar_accessory_anchor_get_origin_from_anchor_transform(anchor);
++            if (logThis) {
++                NSLog(@"[vrhands]   anchor tracked=%d held=%d chirality=%s pos=(%.3f, %.3f, %.3f)",
++                      tracked, ar_accessory_anchor_is_held(anchor),
++                      ch == ar_accessory_chirality_left  ? "left"
++                    : ch == ar_accessory_chirality_right ? "right" : "unspecified",
++                      (double)xf.columns[3].x, (double)xf.columns[3].y, (double)xf.columns[3].z);
++            }
++            if (!tracked) { return true; }
++            // Chirality can be unspecified (a controller resting on a table has
++            // no hand). Fall back to the accessory's INHERENT chirality, which a
++            // left/right pair always has, rather than guessing from position.
++            int hand = -1;
++            if (ch == ar_accessory_chirality_left)  { hand = SM64_VR_HAND_LEFT;  }
++            else if (ch == ar_accessory_chirality_right) { hand = SM64_VR_HAND_RIGHT; }
++            else {
++                ar_accessory_t acc = ar_accessory_anchor_get_accessory(anchor);
++                if (acc != NULL) {
++                    ar_accessory_chirality_t inh = ar_accessory_get_inherent_chirality(acc);
++                    if (inh == ar_accessory_chirality_left)  { hand = SM64_VR_HAND_LEFT;  }
++                    if (inh == ar_accessory_chirality_right) { hand = SM64_VR_HAND_RIGHT; }
++                }
++            }
++            if (hand < 0) { return true; }
++            sHandWorld[hand] = xf;
++            sHandValid[hand] = 1;
++            seenMask |= (1 << hand);
++            return true;
++        });
++
++        // Anything not seen this poll stops being drawn, rather than lingering
++        // at its last pose.
++        for (int h = 0; h < 2; h++) { if (!(seenMask & (1 << h))) { sHandValid[h] = 0; } }
++    }
++}
++
++// ---------------------------------------------------------------------------
++// Query
++// ---------------------------------------------------------------------------
++int sm64_vr_hands_active(void) {
++    if (!sHandsEnabled) { return 0; }
++    if (!sm64_vr_first_person_active()) { return 0; }  // your hands belong where your body is
++    return (sHandValid[0] || sHandValid[1]) ? 1 : 0;
++}
++
++int sm64_vr_hand_matrix(int hand, float out[4][4]) {
++    if (hand < 0 || hand > 1 || !sHandValid[hand] || !sHandsEnabled) { return 0; }
++
++    float camFromWorld[16];
++    if (!sm64_vr_camera_from_world(camFromWorld)) { return 0; }
++
++    simd_float4x4 CfW;
++    memcpy(&CfW, camFromWorld, sizeof(CfW));
++
++    simd_float4x4 M = simd_mul(CfW, sHandWorld[hand]);
++
++    // Mario's hand geometry is in HIS units, and camera space is game units, so
++    // the only scaling wanted is the taste knob. Applied on the right so it
++    // scales the model about its own origin rather than sliding it along the
++    // camera axes.
++    if (sHandScale != 1.0f) {
++        simd_float4x4 S = matrix_identity_float4x4;
++        S.columns[0].x = S.columns[1].y = S.columns[2].z = sHandScale;
++        M = simd_mul(M, S);
++    }
++
++    // simd stores column-major, which IS fast3d's row-vector layout read straight
++    // through — the same identity the EyeVP publish relies on.
++    memcpy(out, &M, sizeof(simd_float4x4));
++    return 1;
++}
++
++void  sm64_vr_hands_set_enabled(int on) { sHandsEnabled = on ? 1 : 0; }
++int   sm64_vr_hands_get_enabled(void)   { return sHandsEnabled; }
++void  sm64_vr_hands_set_scale(float s)  { if (s >= 0.1f && s <= 10.0f) { sHandScale = s; } }
++float sm64_vr_hands_get_scale(void)     { return sHandScale; }
++
++#endif // SM64_VISION_3D
 --- a/src/pc/gfx/gfx_pc.c
 +++ b/src/pc/gfx/gfx_pc.c
-@@ -657,7 +657,202 @@
- 
+@@ -658,7 +658,205 @@
      gfx_transposed_matrix_mul(coeffs, light_dir, rsp.modelview_matrix_stack[rsp.modelview_matrix_stack_size - 1]);
      vec3f_normalize(coeffs);
-+}
+ }
 +
 +// ---------------------------------------------------------------------------
 +// visionOS stereoscopic 3D — the per-eye projection (overlay 0011, Phase 2).
@@ -5280,6 +5643,9 @@ WHAT IS NOT TOUCHED
 +// byte-identical code: GFX_PROJECTION() degenerates to rsp.P_matrix.
 +// ---------------------------------------------------------------------------
 +#include "pc/vision3d/sm64_vision_3d.h"
++#ifdef SM64_VISION_3D
++#include "pc/vision3d/sm64_vr_hands.h"   // charter R4: Mario's hands on your controllers
++#endif
 +
 +#ifdef SM64_VISION_3D
 +// The eye currently being rendered. ONE source of truth: gfx_metal.mm reads
@@ -5390,7 +5756,7 @@ WHAT IS NOT TOUCHED
 +            return sm64_gfx_eye_P;
 +        }
 +    }
-+
+ 
 +    // Signed half-separation for this eye.
 +    const float e = (sm64_gfx_3d_eye == SM64_EYE_RIGHT ? 1.0f : -1.0f) * 0.5f * sm64_gfx_3d_sep;
 +
@@ -5461,15 +5827,16 @@ WHAT IS NOT TOUCHED
 +    sm64_gfx_eye_P[2][0] += -rsp.P_matrix[0][0] * e / sm64_gfx_3d_conv;
 +
 +    return sm64_gfx_eye_P;
- }
++}
 +#define GFX_PROJECTION() gfx_stereo_projection()
 +#else
 +#define GFX_PROJECTION() rsp.P_matrix
 +#endif
- 
++
  static void OPTIMIZE_O3 gfx_sp_matrix(uint8_t parameters, const int32_t *addr) {
  
-@@ -705,7 +900,7 @@
+     Mat4 matrix;
+@@ -705,7 +903,7 @@
          }
          rsp.lights_changed = 1;
      }
@@ -5478,7 +5845,7 @@ WHAT IS NOT TOUCHED
  }
  
  static void gfx_sp_pop_matrix(uint32_t count) {
-@@ -713,13 +908,19 @@
+@@ -713,13 +911,19 @@
          if (rsp.modelview_matrix_stack_size > 0) {
              --rsp.modelview_matrix_stack_size;
              if (rsp.modelview_matrix_stack_size > 0) {
@@ -5499,7 +5866,7 @@ WHAT IS NOT TOUCHED
      float adjusted = x * gfx_current_dimensions.x_adjust_ratio;
  
      // Force 2D coordinates to be aligned perfectly on the nearest pixel
-@@ -2050,6 +2251,16 @@
+@@ -2050,6 +2254,16 @@
  }
  
  static void gfx_sp_reset(void) {
@@ -5516,19 +5883,97 @@ WHAT IS NOT TOUCHED
      rsp.modelview_matrix_stack_size = 1;
      rsp.current_num_lights = 2;
      rsp.lights_changed = true;
-@@ -2078,6 +2289,11 @@
-     return gfx_rapi;
- }
+@@ -2076,7 +2290,89 @@
  
+ struct GfxRenderingAPI *gfx_get_current_rendering_api(void) {
+     return gfx_rapi;
++}
++
 +#ifdef SM64_VISION_3D
 +// The tail of gfx_run(), split out so the both-eyes path can run it twice.
 +static void gfx_run_eye(Gfx *commands);
-+#endif
 +
++// ---------------------------------------------------------------------------
++// Mario's hands on your controllers (charter R4, Austin 2026-08-08).
++//
++// Drawn by the ENGINE rather than by the compositor loop, which is what buys the
++// VR projection, the depth buffer and occlusion against the world for free — the
++// loop has no access to N64 geometry at all. Built ONCE per host frame and run in
++// BOTH eyes: the hand's model->camera matrix is the same for each, because the
++// entire eye difference lives in EyeVP.
++//
++// SCOPE: hands only, no arms (decided with Austin). Mario's arms are animation-
++// driven and his proportions are not yours, so reaching them to the controllers
++// gives either stretched arms or hands that lag where you put them. Floating
++// hands are what most VR titles ship, and they read as YOURS precisely because
++// nothing contradicts your proprioception.
++//
++// WHY A PRIMITIVE-COLOUR COMBINER RATHER THAN MARIO'S OWN MATERIAL. The hand
++// display lists carry vertices and triangles and NOTHING else — no combiner, no
++// geometry mode, and crucially no lights; all of that comes from the geo layout
++// that wraps them when Mario is drawn normally, and the ASM nodes that set his
++// lights are player-colour nodes we would have to reimplement. Worse, the failure
++// is not an error: clearing G_LIGHTING makes the vertex NORMALS get read as
++// colours, which looks like a texture bug rather than a material one. A flat
++// primitive colour cannot fail that way, and Mario's gloves are white anyway, so
++// the "debug" material is also the correct one.
++//
++// The PERSPECTIVE projection load is load-bearing for the same reason as the sky
++// dome's: gfx_stereo_projection picks its branch off P[3][3], and by the time the
++// game's list has finished, the last projection loaded is the HUD's ORTHO. The
++// values are irrelevant — the VR branch replaces the matrix with EyeVP outright —
++// only "this is perspective" matters.
++// ---------------------------------------------------------------------------
++extern const Gfx mario_left_hand_closed_shared_dl[];
++extern const Gfx mario_right_hand_closed_dl[];
++
++static Gfx *sm64_gfx_hands_dl = NULL;   // built in gfx_run(), run in each eye
++
++static Gfx *sm64_gfx_build_hands_dl(void) {
++    if (!sm64_vr_hands_active()) { return NULL; }
++
++    float lm[4][4], rm[4][4];
++    int haveL = sm64_vr_hand_matrix(SM64_VR_HAND_LEFT, lm);
++    int haveR = sm64_vr_hand_matrix(SM64_VR_HAND_RIGHT, rm);
++    if (!haveL && !haveR) { return NULL; }
++
++    Gfx *dl = alloc_display_list(24 * sizeof(Gfx));
++    Mtx *persp = alloc_display_list(sizeof(Mtx));
++    if (dl == NULL || persp == NULL) { return NULL; }
++    u16 perspNorm;
++    guPerspective(persp, &perspNorm, 45.0f, 1.0f, 10.0f, 20000.0f, 1.0f);
++
++    Gfx *g = dl;
++    gDPPipeSync(g++);
++    gSPMatrix(g++, VIRTUAL_TO_PHYSICAL(persp), G_MTX_PROJECTION | G_MTX_LOAD | G_MTX_NOPUSH);
++    gSPClearGeometryMode(g++, G_LIGHTING | G_TEXTURE_GEN | G_TEXTURE_GEN_LINEAR);
++    gSPSetGeometryMode(g++, G_ZBUFFER | G_SHADE | G_CULL_BACK);
++    gSPTexture(g++, 0xFFFF, 0xFFFF, 0, G_TX_RENDERTILE, G_OFF);
++    gDPSetCombineMode(g++, G_CC_PRIMITIVE, G_CC_PRIMITIVE);
++    gDPSetPrimColor(g++, 0, 0, 255, 255, 255, 255);   // Mario's white gloves
++    gDPSetRenderMode(g++, G_RM_AA_ZB_OPA_SURF, G_RM_AA_ZB_OPA_SURF2);
++
++    for (int hand = 0; hand < 2; hand++) {
++        if (hand == SM64_VR_HAND_LEFT  && !haveL) { continue; }
++        if (hand == SM64_VR_HAND_RIGHT && !haveR) { continue; }
++        Mtx *m = alloc_display_list(sizeof(Mtx));
++        if (m == NULL) { continue; }
++        guMtxF2L(hand == SM64_VR_HAND_LEFT ? lm : rm, m);
++        gSPMatrix(g++, VIRTUAL_TO_PHYSICAL(m), G_MTX_MODELVIEW | G_MTX_LOAD | G_MTX_PUSH);
++        gSPDisplayList(g++, hand == SM64_VR_HAND_LEFT ? mario_left_hand_closed_shared_dl
++                                                      : mario_right_hand_closed_dl);
++        gSPPopMatrix(g++, G_MTX_MODELVIEW);
++    }
++
++    gDPPipeSync(g++);
++    gSPEndDisplayList(g);
++    return dl;
+ }
++#endif
+ 
  void gfx_start_frame(void) {
      if (gGfxPcResetTex1 > 0) {
-         gGfxPcResetTex1--;
-@@ -2086,6 +2302,21 @@
+@@ -2086,6 +2382,21 @@
      }
      gfx_wapi->handle_events();
      gfx_wapi->get_dimensions(&gfx_current_dimensions.width, &gfx_current_dimensions.height);
@@ -5550,7 +5995,7 @@ WHAT IS NOT TOUCHED
      if (gfx_current_dimensions.height == 0) {
          // Avoid division by zero
          gfx_current_dimensions.height = 1;
-@@ -2100,6 +2331,42 @@
+@@ -2100,6 +2411,46 @@
  }
  
  void gfx_run(Gfx *commands) {
@@ -5578,6 +6023,10 @@ WHAT IS NOT TOUCHED
 +    // loop never returns to the run loop (D-024 / M-38), so "after boot" work
 +    // has nowhere else to live.
 +    sm64_3d_frame_poll();
++    // Built once, run in both eyes (see sm64_gfx_build_hands_dl). NULL whenever
++    // hands are off, not first-person, or nothing is tracked — which is the
++    // common case and costs a flag test.
++    sm64_gfx_hands_dl = sm64_gfx_build_hands_dl();
 +    if (sm64_metal_get_3d_mode()) {
 +        sm64_gfx_set_3d_eye(SM64_EYE_LEFT);
 +        gfx_run_eye(commands);
@@ -5593,7 +6042,17 @@ WHAT IS NOT TOUCHED
      gfx_sp_reset();
  
      sHasInverseCameraMatrix = false;
-@@ -2458,6 +2725,21 @@
+@@ -2115,6 +2466,9 @@
+     //double t0 = gfx_wapi->get_time();
+     gfx_rapi->start_frame();
+     gfx_run_dl(commands);
++#ifdef SM64_VISION_3D
++    if (sm64_gfx_hands_dl != NULL) { gfx_run_dl(sm64_gfx_hands_dl); }
++#endif
+ }
+ 
+ void gfx_end_frame_render(void) {
+@@ -2458,6 +2812,21 @@
  void OPTIMIZE_O3 ext_gfx_run_dl(Gfx* cmd) {
      uint32_t opcode = cmd->words.w0 >> 24;
      switch (opcode) {

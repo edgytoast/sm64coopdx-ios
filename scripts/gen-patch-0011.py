@@ -205,6 +205,9 @@ NEW_FILES = [
     # Charter R3: PSVR2 Sense controllers as an N64 pad.
     "controller_vision.h",
     "controller_vision.m",
+    # Charter R4: ARKit accessory poses -> Mario's hands in first-person.
+    "sm64_vr_hands.h",
+    "sm64_vr_hands.m",
 ]
 for name in NEW_FILES:
     src = APP / name
@@ -228,6 +231,9 @@ NEW_STEREO = '''// -------------------------------------------------------------
 // byte-identical code: GFX_PROJECTION() degenerates to rsp.P_matrix.
 // ---------------------------------------------------------------------------
 #include "pc/vision3d/sm64_vision_3d.h"
+#ifdef SM64_VISION_3D
+#include "pc/vision3d/sm64_vr_hands.h"   // charter R4: Mario's hands on your controllers
+#endif
 
 #ifdef SM64_VISION_3D
 // The eye currently being rendered. ONE source of truth: gfx_metal.mm reads
@@ -436,6 +442,22 @@ NEW_MP2 = """                mtxf_mul(rsp.MP_matrix, rsp.modelview_matrix_stack[
 t_gfx = replace_once(t_gfx, OLD_MP2, NEW_MP2, "mp-compose-pop",
                      "                mtxf_mul(rsp.MP_matrix, rsp.modelview_matrix_stack[rsp.modelview_matrix_stack_size - 1], GFX_PROJECTION());")
 
+# The hands ride at the very end of the eye's list, after the game's own
+# commands. Last is the only place they can go: they need the world's depth
+# buffer to occlude against, and building them earlier would mean guessing where
+# the game's list stops drawing the world.
+OLD_HANDS_DRAW = """    gfx_rapi->start_frame();
+    gfx_run_dl(commands);
+}"""
+NEW_HANDS_DRAW = """    gfx_rapi->start_frame();
+    gfx_run_dl(commands);
+#ifdef SM64_VISION_3D
+    if (sm64_gfx_hands_dl != NULL) { gfx_run_dl(sm64_gfx_hands_dl); }
+#endif
+}"""
+t_gfx = replace_once(t_gfx, OLD_HANDS_DRAW, NEW_HANDS_DRAW, "gfx-hands-draw",
+                     "sm64_gfx_hands_dl != NULL")
+
 OLD_RUN = """void gfx_run(Gfx *commands) {
     gfx_sp_reset();"""
 NEW_RUN = """void gfx_run(Gfx *commands) {
@@ -463,6 +485,10 @@ NEW_RUN = """void gfx_run(Gfx *commands) {
     // loop never returns to the run loop (D-024 / M-38), so "after boot" work
     // has nowhere else to live.
     sm64_3d_frame_poll();
+    // Built once, run in both eyes (see sm64_gfx_build_hands_dl). NULL whenever
+    // hands are off, not first-person, or nothing is tracked — which is the
+    // common case and costs a flag test.
+    sm64_gfx_hands_dl = sm64_gfx_build_hands_dl();
     if (sm64_metal_get_3d_mode()) {
         sm64_gfx_set_3d_eye(SM64_EYE_LEFT);
         gfx_run_eye(commands);
@@ -483,12 +509,89 @@ t_gfx = replace_once(t_gfx, OLD_RUN, NEW_RUN, "gfx-run-both-eyes", "gfx_run_eye"
 # forward declaration — gfx_pc.h:43-44 already declares them and this file
 # includes it at :37.
 OLD_FWD = """void gfx_start_frame(void) {"""
-NEW_FWD = """#ifdef SM64_VISION_3D
+NEW_FWD = r'''#ifdef SM64_VISION_3D
 // The tail of gfx_run(), split out so the both-eyes path can run it twice.
 static void gfx_run_eye(Gfx *commands);
+
+// ---------------------------------------------------------------------------
+// Mario's hands on your controllers (charter R4, Austin 2026-08-08).
+//
+// Drawn by the ENGINE rather than by the compositor loop, which is what buys the
+// VR projection, the depth buffer and occlusion against the world for free — the
+// loop has no access to N64 geometry at all. Built ONCE per host frame and run in
+// BOTH eyes: the hand's model->camera matrix is the same for each, because the
+// entire eye difference lives in EyeVP.
+//
+// SCOPE: hands only, no arms (decided with Austin). Mario's arms are animation-
+// driven and his proportions are not yours, so reaching them to the controllers
+// gives either stretched arms or hands that lag where you put them. Floating
+// hands are what most VR titles ship, and they read as YOURS precisely because
+// nothing contradicts your proprioception.
+//
+// WHY A PRIMITIVE-COLOUR COMBINER RATHER THAN MARIO'S OWN MATERIAL. The hand
+// display lists carry vertices and triangles and NOTHING else — no combiner, no
+// geometry mode, and crucially no lights; all of that comes from the geo layout
+// that wraps them when Mario is drawn normally, and the ASM nodes that set his
+// lights are player-colour nodes we would have to reimplement. Worse, the failure
+// is not an error: clearing G_LIGHTING makes the vertex NORMALS get read as
+// colours, which looks like a texture bug rather than a material one. A flat
+// primitive colour cannot fail that way, and Mario's gloves are white anyway, so
+// the "debug" material is also the correct one.
+//
+// The PERSPECTIVE projection load is load-bearing for the same reason as the sky
+// dome's: gfx_stereo_projection picks its branch off P[3][3], and by the time the
+// game's list has finished, the last projection loaded is the HUD's ORTHO. The
+// values are irrelevant — the VR branch replaces the matrix with EyeVP outright —
+// only "this is perspective" matters.
+// ---------------------------------------------------------------------------
+extern const Gfx mario_left_hand_closed_shared_dl[];
+extern const Gfx mario_right_hand_closed_dl[];
+
+static Gfx *sm64_gfx_hands_dl = NULL;   // built in gfx_run(), run in each eye
+
+static Gfx *sm64_gfx_build_hands_dl(void) {
+    if (!sm64_vr_hands_active()) { return NULL; }
+
+    float lm[4][4], rm[4][4];
+    int haveL = sm64_vr_hand_matrix(SM64_VR_HAND_LEFT, lm);
+    int haveR = sm64_vr_hand_matrix(SM64_VR_HAND_RIGHT, rm);
+    if (!haveL && !haveR) { return NULL; }
+
+    Gfx *dl = alloc_display_list(24 * sizeof(Gfx));
+    Mtx *persp = alloc_display_list(sizeof(Mtx));
+    if (dl == NULL || persp == NULL) { return NULL; }
+    u16 perspNorm;
+    guPerspective(persp, &perspNorm, 45.0f, 1.0f, 10.0f, 20000.0f, 1.0f);
+
+    Gfx *g = dl;
+    gDPPipeSync(g++);
+    gSPMatrix(g++, VIRTUAL_TO_PHYSICAL(persp), G_MTX_PROJECTION | G_MTX_LOAD | G_MTX_NOPUSH);
+    gSPClearGeometryMode(g++, G_LIGHTING | G_TEXTURE_GEN | G_TEXTURE_GEN_LINEAR);
+    gSPSetGeometryMode(g++, G_ZBUFFER | G_SHADE | G_CULL_BACK);
+    gSPTexture(g++, 0xFFFF, 0xFFFF, 0, G_TX_RENDERTILE, G_OFF);
+    gDPSetCombineMode(g++, G_CC_PRIMITIVE, G_CC_PRIMITIVE);
+    gDPSetPrimColor(g++, 0, 0, 255, 255, 255, 255);   // Mario's white gloves
+    gDPSetRenderMode(g++, G_RM_AA_ZB_OPA_SURF, G_RM_AA_ZB_OPA_SURF2);
+
+    for (int hand = 0; hand < 2; hand++) {
+        if (hand == SM64_VR_HAND_LEFT  && !haveL) { continue; }
+        if (hand == SM64_VR_HAND_RIGHT && !haveR) { continue; }
+        Mtx *m = alloc_display_list(sizeof(Mtx));
+        if (m == NULL) { continue; }
+        guMtxF2L(hand == SM64_VR_HAND_LEFT ? lm : rm, m);
+        gSPMatrix(g++, VIRTUAL_TO_PHYSICAL(m), G_MTX_MODELVIEW | G_MTX_LOAD | G_MTX_PUSH);
+        gSPDisplayList(g++, hand == SM64_VR_HAND_LEFT ? mario_left_hand_closed_shared_dl
+                                                      : mario_right_hand_closed_dl);
+        gSPPopMatrix(g++, G_MTX_MODELVIEW);
+    }
+
+    gDPPipeSync(g++);
+    gSPEndDisplayList(g);
+    return dl;
+}
 #endif
 
-void gfx_start_frame(void) {"""
+void gfx_start_frame(void) {'''
 t_gfx = replace_once(t_gfx, OLD_FWD, NEW_FWD, "gfx-run-eye-fwd", "static void gfx_run_eye(Gfx *commands);")
 
 # P1-a: the G_NOOP handler that reads the skybox's background-layer markers.

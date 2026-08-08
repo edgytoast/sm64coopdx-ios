@@ -198,6 +198,8 @@ NEW_FILES = [
     # The in-game VR options panel (charter R2, pulled forward 2026-08-07).
     "djui_panel_vr.h",
     "djui_panel_vr.c",
+    # Charter A5: the menu/gameplay predicate, read from the game's own state.
+    "sm64_vr_gamestate.c",
 ]
 for name in NEW_FILES:
     src = APP / name

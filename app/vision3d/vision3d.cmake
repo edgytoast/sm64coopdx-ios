@@ -97,6 +97,7 @@ function(_sm64_vision3d_wire)
         ${GAME_ROOT}/src/pc/vision3d/SM64VisionApp.swift
         # The in-game VR options panel: plain C, so no -fobjc-arc.
         ${GAME_ROOT}/src/pc/vision3d/djui_panel_vr.c
+        ${GAME_ROOT}/src/pc/vision3d/sm64_vr_gamestate.c
     )
     set_target_properties(sm64coopdx PROPERTIES
         # Build number (CFBundleVersion). Separate build setting from 0005's

@@ -290,6 +290,12 @@ void sm64_3d_frame_poll(void) {
         }
     }
 
+    // Charter A5: classify this frame on the ENGINE thread (this hook IS the
+    // game loop's thread), so the compositor never reads game state.
+    if (sm64_vr_spike_variant != 0) {
+        sm64_vr_spike_set_panel_mode(sm64_vr_frame_is_nongameplay() ? 1 : 0);
+    }
+
     // R0 SPIKE (throwaway): arm the console bridge on the DEVICE. The bridge is
     // launch-gated on SM64_CONSOLE (impossible from SpringBoard) or the presence
     // of Documents/console_enabled.txt, so creating that file here means the

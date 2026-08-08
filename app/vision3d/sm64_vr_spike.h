@@ -78,6 +78,15 @@ void sm64_vr_spike_set_world_lock(int on);
 // 1.0 = no passthrough. This replaces the "Full VR" button.
 void sm64_vr_spike_set_dim(float dim);
 
+// Panel mode (charter A5): present the flat frame on a world-locked panel rather
+// than as a stereo world. Driven from the engine thread each frame by
+// sm64_vr_frame_is_nongameplay().
+void sm64_vr_spike_set_panel_mode(int on);
+int  sm64_vr_spike_panel_mode(void);
+
+// "Is this frame a menu?" — sm64_vr_gamestate.c, evaluated on the engine thread.
+bool sm64_vr_frame_is_nongameplay(void);
+
 // The VR eye-texture size, so gfx_metal and gfx_pc can both size from the VIEW
 // instead of the flat panel's budget. Returns 0 when VR is not driving.
 int sm64_vr_spike_render_size(int *w, int *h);

@@ -123,7 +123,7 @@ WHAT IS NOT TOUCHED
 
 --- /dev/null
 +++ b/src/pc/vision3d/sm64_vision_3d.h
-@@ -0,0 +1,233 @@
+@@ -0,0 +1,235 @@
 +#ifndef SM64_VISION_3D_H
 +#define SM64_VISION_3D_H
 +
@@ -349,7 +349,9 @@ WHAT IS NOT TOUCHED
 +#define SM64_DEF_VRRENDER    0.85f   // eye render size as a fraction of the per-eye view
 +#define SM64_DEF_VRWORLDLOCK 1.0f    // 1 = look around the world; 0 = it follows your head
 +#define SM64_DEF_VRDIM       1.00f   // surroundings dimming; 1.0 = no passthrough
-+#define SM64_DEF_VRMSAA      4.0f    // VR eye-pass MSAA: 1 = off, else 2/4/8
++#define SM64_DEF_VRMSAA      2.0f    // VR eye-pass MSAA. 2x by Austin's eye on device
++                                     // (2026-08-07): "2x is good ... hard to see noticeable
++                                     // improvement after that", and it is the cheapest rung.
 +
 +#ifdef __cplusplus
 +}
@@ -430,7 +432,7 @@ WHAT IS NOT TOUCHED
 +#endif // SM64_VISION_HOST_H
 --- /dev/null
 +++ b/src/pc/vision3d/sm64_vision_host.m
-@@ -0,0 +1,680 @@
+@@ -0,0 +1,686 @@
 +// sm64_vision_host.m — boots the SDL/coopdx engine under the SwiftUI app entry
 +// (visionOS only) and owns the 2D<->3D transition sequencing.
 +//
@@ -721,6 +723,12 @@ WHAT IS NOT TOUCHED
 +            NSLog(@"[sm64vp] AUTOENTER firing from the frame hook (mainq ticks=%d)", sm64_mainq_ticks);
 +            sm64_3d_enter(true);
 +        }
++    }
++
++    // Charter A5: classify this frame on the ENGINE thread (this hook IS the
++    // game loop's thread), so the compositor never reads game state.
++    if (sm64_vr_spike_variant != 0) {
++        sm64_vr_spike_set_panel_mode(sm64_vr_frame_is_nongameplay() ? 1 : 0);
 +    }
 +
 +    // R0 SPIKE (throwaway): arm the console bridge on the DEVICE. The bridge is
@@ -2845,7 +2853,7 @@ WHAT IS NOT TOUCHED
 +}
 --- /dev/null
 +++ b/src/pc/vision3d/sm64_vr_spike.h
-@@ -0,0 +1,95 @@
+@@ -0,0 +1,104 @@
 +#ifndef SM64_VR_SPIKE_H
 +#define SM64_VR_SPIKE_H
 +
@@ -2926,6 +2934,15 @@ WHAT IS NOT TOUCHED
 +// 1.0 = no passthrough. This replaces the "Full VR" button.
 +void sm64_vr_spike_set_dim(float dim);
 +
++// Panel mode (charter A5): present the flat frame on a world-locked panel rather
++// than as a stereo world. Driven from the engine thread each frame by
++// sm64_vr_frame_is_nongameplay().
++void sm64_vr_spike_set_panel_mode(int on);
++int  sm64_vr_spike_panel_mode(void);
++
++// "Is this frame a menu?" — sm64_vr_gamestate.c, evaluated on the engine thread.
++bool sm64_vr_frame_is_nongameplay(void);
++
 +// The VR eye-texture size, so gfx_metal and gfx_pc can both size from the VIEW
 +// instead of the flat panel's budget. Returns 0 when VR is not driving.
 +int sm64_vr_spike_render_size(int *w, int *h);
@@ -2943,7 +2960,7 @@ WHAT IS NOT TOUCHED
 +#endif // SM64_VR_SPIKE_H
 --- /dev/null
 +++ b/src/pc/vision3d/sm64_vr_spike.m
-@@ -0,0 +1,917 @@
+@@ -0,0 +1,1022 @@
 +// sm64_vr_spike.m — R0 SPIKE, THROWAWAY. See sm64_vr_spike.h for the question
 +// this exists to answer (VR-CHARTER §5 R0.1 / A7).
 +//
@@ -3073,6 +3090,16 @@ WHAT IS NOT TOUCHED
 +
 +void sm64_vr_spike_set_world_lock(int on) { sVrWorldLock = on ? 1 : 0; }
 +
++// PANEL MODE (charter A5). Set from the engine thread every frame; read by both
++// the engine (through the accessors below, which go NULL so the game renders its
++// own flat projection) and this loop (which then draws the frame on a quad
++// instead of across your whole view). A one-frame disagreement at a menu
++// boundary is harmless — the frame is either flat-on-a-panel or stereo, never a
++// mixture, because both sides read the same flag.
++static volatile int sVrPanelMode = 0;
++void sm64_vr_spike_set_panel_mode(int on) { sVrPanelMode = on ? 1 : 0; }
++int  sm64_vr_spike_panel_mode(void) { return sVrPanelMode; }
++
 +void sm64_vr_spike_set_dim(float dim) {
 +    dim = (dim < 0.0f) ? 0.0f : (dim > 1.0f ? 1.0f : dim);
 +    // Same perceptual curve as the panel's dimming: a LINEAR slider "doesn't
@@ -3106,16 +3133,16 @@ WHAT IS NOT TOUCHED
 +// Called from gfx_stereo_projection on the engine thread, once per matrix
 +// composition — kept to a flag test and a pointer.
 +const float *sm64_vr_eye_viewproj(int eye) {
-+    if (!sVrValid || eye < 1 || eye > 2) { return NULL; }
++    if (!sVrValid || sVrPanelMode || eye < 1 || eye > 2) { return NULL; }
 +    return &sVrEyeVP[eye - 1][0][0];
 +}
 +
 +const float *sm64_vr_hud_matrix(int eye) {
-+    if (!sVrValid || eye < 1 || eye > 2) { return NULL; }
++    if (!sVrValid || sVrPanelMode || eye < 1 || eye > 2) { return NULL; }
 +    return &sVrHudVP[eye - 1][0][0];
 +}
 +
-+int sm64_vr_hide_background(void) { return sVrWorld; }
++int sm64_vr_hide_background(void) { return sVrWorld && !sVrPanelMode; }
 +
 +// The compositor's own projection with ONLY its depth row replaced.
 +//
@@ -3285,6 +3312,35 @@ WHAT IS NOT TOUCHED
 +// sliders move the world while you drag them. The POSE is still frozen: this is
 +// R0, and keeping the pose out of the loop means a world that looks wrong is a
 +// matrix or a number, never pose plumbing.
++// Where the flat panel sits in panel mode: level, facing you, anchored to the
++// same head pose the world is. Distance and size are fixed for now — the point
++// of this screen is legibility, not another slider.
++static const float kVrPanelDist  = 2.6f;
++static const float kVrPanelHalfH = 1.05f;   // half-width follows the texture aspect;
++                                            // ~2.1 m tall at 2.6 m, a big-screen feel
++                                            // rather than a floating dialog
++
++static simd_float4x4 sm64_vr_panel_placement(simd_float4x4 frozenHead) {
++    simd_float3 headPos = frozenHead.columns[3].xyz;
++    simd_float3 fwd = -frozenHead.columns[2].xyz;
++    fwd.y = 0.0f;
++    float len = simd_length(fwd);
++    fwd = (len < 1e-4f) ? simd_make_float3(0, 0, -1) : fwd / len;
++    simd_float3 pos = headPos + fwd * kVrPanelDist;
++
++    simd_float3 zAxis = -fwd;
++    simd_float3 yAxis = simd_make_float3(0, 1, 0);
++    simd_float3 xAxis = simd_normalize(simd_cross(yAxis, zAxis));
++    yAxis = simd_cross(zAxis, xAxis);
++
++    simd_float4x4 m;
++    m.columns[0] = simd_make_float4(xAxis, 0.0f);
++    m.columns[1] = simd_make_float4(yAxis, 0.0f);
++    m.columns[2] = simd_make_float4(zAxis, 0.0f);
++    m.columns[3] = simd_make_float4(pos, 1.0f);
++    return m;
++}
++
 +static void sm64_vr_build_matrices(cp_drawable_t drawable, simd_float4x4 frozenHead,
 +                                   simd_float4x4 liveHead, bool logIt) {
 +    const float invS = 1.0f / sVrScale;
@@ -3434,10 +3490,27 @@ WHAT IS NOT TOUCHED
 +     "}\n"
 +     "fragment float4 vr_dim_fs(constant float& dim [[buffer(0)]]) {\n"
 +     "  return float4(0.0, 0.0, 0.0, dim);\n"
++     "}\n"
++     // Panel mode: the flat frame on a world-locked quad, the same presentation
++     // the shipped 3D mode uses. Opaque, and no black keying — a menu screen is
++     // MEANT to be a screen.
++     "vertex VOut vr_quad_vs(uint vid [[vertex_id]], constant float4x4& mvp [[buffer(0)]]) {\n"
++     "  const float2 p[4] = { float2(-1,-1), float2(1,-1), float2(-1,1), float2(1,1) };\n"
++     "  VOut o; o.pos = mvp * float4(p[vid], 0.0, 1.0);\n"
++     "  o.uv = float2(p[vid].x * 0.5 + 0.5, 0.5 - p[vid].y * 0.5);\n"
++     "  return o;\n"
++     "}\n"
++     "fragment float4 vr_quad_fs(VOut in [[stage_in]], texture2d<float> tex [[texture(0)]],\n"
++     "                           constant float& srgbDecode [[buffer(0)]]) {\n"
++     "  constexpr sampler s(filter::linear, mip_filter::linear, max_anisotropy(16));\n"
++     "  float4 c = tex.sample(s, in.uv);\n"
++     "  if (srgbDecode > 0.5) { c.rgb = pow(c.rgb, float3(2.2)); }\n"
++     "  return float4(c.rgb, 1.0);\n"
 +     "}\n";
 +
 +static id<MTLRenderPipelineState> sVrPipeline;
 +static id<MTLRenderPipelineState> sVrDimPipeline;
++static id<MTLRenderPipelineState> sVrQuadPipeline;
 +static id<MTLDepthStencilState> sVrDepthState;
 +// Mipmapped per-eye copies, latched as an atomic pair (see the copy site).
 +static id<MTLTexture> sVrEyeCopy[2];
@@ -3475,6 +3548,14 @@ WHAT IS NOT TOUCHED
 +    dp.depthAttachmentPixelFormat = depthFmt;
 +    sVrDimPipeline = [dev newRenderPipelineStateWithDescriptor:dp error:&err];
 +    if (!sVrDimPipeline) { NSLog(@"[vrspike] dim pipeline FAILED: %@", err.localizedDescription); }
++
++    MTLRenderPipelineDescriptor *qp = [MTLRenderPipelineDescriptor new];
++    qp.vertexFunction = [lib newFunctionWithName:@"vr_quad_vs"];
++    qp.fragmentFunction = [lib newFunctionWithName:@"vr_quad_fs"];
++    qp.colorAttachments[0].pixelFormat = colorFmt;
++    qp.depthAttachmentPixelFormat = depthFmt;
++    sVrQuadPipeline = [dev newRenderPipelineStateWithDescriptor:qp error:&err];
++    if (!sVrQuadPipeline) { NSLog(@"[vrspike] quad pipeline FAILED: %@", err.localizedDescription); }
 +    NSLog(@"[vrspike] world pipeline built (colorFmt=%lu depthFmt=%lu)",
 +          (unsigned long)colorFmt, (unsigned long)depthFmt);
 +}
@@ -3787,8 +3868,49 @@ WHAT IS NOT TOUCHED
 +                    [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
 +                }
 +
-+                // R0.2: paint this eye's engine render over the whole slice.
-+                if (sVrWorld && sVrValid && sVrPipeline) {
++                // PANEL MODE (charter A5): the flat frame on a world-locked
++                // quad, anchored where the world was. The projection here is
++                // Apple's OWN (reverse-Z, untouched) because this quad is drawn
++                // by us in the compositor's pass — only the engine needs the
++                // forward-Z rebuild.
++                if (sVrWorld && sVrPanelMode && sVrQuadPipeline && sVrEyeCopy[0]) {
++                    id<MTLTexture> src = sVrEyeCopy[(v < 2) ? v : 0];
++                    if (src == nil) { src = sVrEyeCopy[0]; }
++                    simd_float4x4 cpProj = matrix_identity_float4x4;
++                    if (__builtin_available(visionOS 2.0, *)) {
++                        cpProj = cp_drawable_compute_projection(
++                            drawable, cp_axis_direction_convention_right_up_back, v);
++                    }
++                    simd_float4x4 deviceFromEye = cp_view_get_transform(vw);
++                    simd_float4x4 eyeFromOrigin =
++                        simd_inverse(simd_mul(frozenHead, deviceFromEye));
++
++                    // Sized from the TEXTURE's aspect, so the flat frame fills
++                    // the quad exactly — the engine renders at the VR view's
++                    // shape, and letterboxing it here would just waste panel.
++                    float texAspect = (src.height > 0)
++                        ? (float)src.width / (float)src.height : (16.0f / 9.0f);
++                    float halfH = kVrPanelHalfH, halfW = kVrPanelHalfH * texAspect;
++
++                    simd_float4x4 place = sm64_vr_panel_placement(frozenHead);
++                    simd_float4x4 scaleM = matrix_identity_float4x4;
++                    scaleM.columns[0].x = halfW;
++                    scaleM.columns[1].y = halfH;
++                    simd_float4x4 mvp = simd_mul(cpProj,
++                        simd_mul(eyeFromOrigin, simd_mul(place, scaleM)));
++
++                    float srgbDecode =
++                        (src.pixelFormat == MTLPixelFormatBGRA8Unorm ||
++                         src.pixelFormat == MTLPixelFormatRGBA8Unorm) ? 1.0f : 0.0f;
++                    [enc setRenderPipelineState:sVrQuadPipeline];
++                    [enc setDepthStencilState:sVrDepthState];
++                    [enc setVertexBytes:&mvp length:sizeof(mvp) atIndex:0];
++                    [enc setFragmentBytes:&srgbDecode length:sizeof(srgbDecode) atIndex:0];
++                    [enc setFragmentTexture:src atIndex:0];
++                    [enc drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:4];
++                }
++                // GAMEPLAY: paint this eye's engine render over the whole slice.
++                else if (sVrWorld && sVrValid && sVrPipeline) {
 +                    id<MTLTexture> src = sVrEyeCopy[(v < 2) ? v : 0];
 +                    if (src == nil) { src = sVrEyeCopy[0] ? sVrEyeCopy[0] : sVrEyeCopy[1]; }
 +                    if (src != nil) {
@@ -4023,6 +4145,55 @@ WHAT IS NOT TOUCHED
 +    }
 +
 +    djui_panel_add(caller, panel, NULL);
++}
++
++#endif // SM64_VISION_3D
+--- /dev/null
++++ b/src/pc/vision3d/sm64_vr_gamestate.c
+@@ -0,0 +1,46 @@
++// sm64_vr_gamestate.c — "is this frame a menu?", answered from the game's own
++// state machine (charter A5, ported from the donor's vr_frame_is_nongameplay,
++// pc_main.c:274-305).
++//
++// WHY IT IS KEYED ON GAME STATE AND NOT ON WHAT GOT DRAWN. Screens like the
++// act/star selector render 3D models behind 2D text, so "did a perspective
++// matrix appear this frame" misclassifies them. The donor learned that one the
++// hard way; asking the state machine is robust for the hybrids.
++//
++// TRUE  -> present the whole flat frame on a world-locked panel, the way the
++//          existing 3D mode already looks. Menus, the title screen, the pause
++//          grid and level transitions all become a finished flat screen instead
++//          of a 2D layer floating inside a world that is not being played.
++// FALSE -> active gameplay: the stereo world.
++//
++// Plain C, living with the VR layer rather than in vendor code, and evaluated on
++// the ENGINE thread (from the frame poll) — the compositor thread must never
++// read game state.
++
++#include "pc/vision3d/sm64_vision_3d.h"
++
++#ifdef SM64_VISION_3D
++
++#include <stdbool.h>
++
++#include "pc/djui/djui.h"          // gDjuiInMainMenu
++#include "pc/djui/djui_panel.h"    // djui_panel_is_active
++#include "game/area.h"             // gWarpTransition
++#include "game/ingame_menu.h"      // gMenuMode
++#include "game/level_update.h"     // gCurrCreditsEntry
++#include "game/game_init.h"        // gCurrDemoInput
++
++bool sm64_vr_frame_is_nongameplay(void) {
++    // A door / level transition is a 2D fullscreen effect. In the stereo world
++    // it would only cover the middle of your view; on the panel it fills the
++    // screen the way it is meant to.
++    if (gWarpTransition.isActive)  { return true; }
++    if (gDjuiInMainMenu)           { return true; }  // title / main menu / connect / options
++    if (djui_panel_is_active())    { return true; }  // in-game menus, including the VR panel
++    if (gCurrCreditsEntry != NULL) { return true; }  // credits / ending
++    if (gCurrDemoInput != NULL)    { return true; }  // attract-mode demo
++    if (gMenuMode != -1)           { return true; }  // pause star grid / course complete
++    return false;                                    // active gameplay
 +}
 +
 +#endif // SM64_VISION_3D

@@ -223,7 +223,9 @@ void sm64_3d_apply_settings(void);
 #define SM64_DEF_VRRENDER    0.85f   // eye render size as a fraction of the per-eye view
 #define SM64_DEF_VRWORLDLOCK 1.0f    // 1 = look around the world; 0 = it follows your head
 #define SM64_DEF_VRDIM       1.00f   // surroundings dimming; 1.0 = no passthrough
-#define SM64_DEF_VRMSAA      4.0f    // VR eye-pass MSAA: 1 = off, else 2/4/8
+#define SM64_DEF_VRMSAA      2.0f    // VR eye-pass MSAA. 2x by Austin's eye on device
+                                     // (2026-08-07): "2x is good ... hard to see noticeable
+                                     // improvement after that", and it is the cheapest rung.
 
 #ifdef __cplusplus
 }

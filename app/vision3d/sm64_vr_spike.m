@@ -127,6 +127,16 @@ static float sVrDim = 1.0f;
 
 void sm64_vr_spike_set_world_lock(int on) { sVrWorldLock = on ? 1 : 0; }
 
+// PANEL MODE (charter A5). Set from the engine thread every frame; read by both
+// the engine (through the accessors below, which go NULL so the game renders its
+// own flat projection) and this loop (which then draws the frame on a quad
+// instead of across your whole view). A one-frame disagreement at a menu
+// boundary is harmless — the frame is either flat-on-a-panel or stereo, never a
+// mixture, because both sides read the same flag.
+static volatile int sVrPanelMode = 0;
+void sm64_vr_spike_set_panel_mode(int on) { sVrPanelMode = on ? 1 : 0; }
+int  sm64_vr_spike_panel_mode(void) { return sVrPanelMode; }
+
 void sm64_vr_spike_set_dim(float dim) {
     dim = (dim < 0.0f) ? 0.0f : (dim > 1.0f ? 1.0f : dim);
     // Same perceptual curve as the panel's dimming: a LINEAR slider "doesn't
@@ -160,16 +170,16 @@ static const float kVrHudHalfH = 0.52f;  // 4:3 against the half-width
 // Called from gfx_stereo_projection on the engine thread, once per matrix
 // composition — kept to a flag test and a pointer.
 const float *sm64_vr_eye_viewproj(int eye) {
-    if (!sVrValid || eye < 1 || eye > 2) { return NULL; }
+    if (!sVrValid || sVrPanelMode || eye < 1 || eye > 2) { return NULL; }
     return &sVrEyeVP[eye - 1][0][0];
 }
 
 const float *sm64_vr_hud_matrix(int eye) {
-    if (!sVrValid || eye < 1 || eye > 2) { return NULL; }
+    if (!sVrValid || sVrPanelMode || eye < 1 || eye > 2) { return NULL; }
     return &sVrHudVP[eye - 1][0][0];
 }
 
-int sm64_vr_hide_background(void) { return sVrWorld; }
+int sm64_vr_hide_background(void) { return sVrWorld && !sVrPanelMode; }
 
 // The compositor's own projection with ONLY its depth row replaced.
 //
@@ -339,6 +349,35 @@ static simd_float4x4 sm64_vr_placement(simd_float4x4 frozenHead) {
 // sliders move the world while you drag them. The POSE is still frozen: this is
 // R0, and keeping the pose out of the loop means a world that looks wrong is a
 // matrix or a number, never pose plumbing.
+// Where the flat panel sits in panel mode: level, facing you, anchored to the
+// same head pose the world is. Distance and size are fixed for now — the point
+// of this screen is legibility, not another slider.
+static const float kVrPanelDist  = 2.6f;
+static const float kVrPanelHalfH = 1.05f;   // half-width follows the texture aspect;
+                                            // ~2.1 m tall at 2.6 m, a big-screen feel
+                                            // rather than a floating dialog
+
+static simd_float4x4 sm64_vr_panel_placement(simd_float4x4 frozenHead) {
+    simd_float3 headPos = frozenHead.columns[3].xyz;
+    simd_float3 fwd = -frozenHead.columns[2].xyz;
+    fwd.y = 0.0f;
+    float len = simd_length(fwd);
+    fwd = (len < 1e-4f) ? simd_make_float3(0, 0, -1) : fwd / len;
+    simd_float3 pos = headPos + fwd * kVrPanelDist;
+
+    simd_float3 zAxis = -fwd;
+    simd_float3 yAxis = simd_make_float3(0, 1, 0);
+    simd_float3 xAxis = simd_normalize(simd_cross(yAxis, zAxis));
+    yAxis = simd_cross(zAxis, xAxis);
+
+    simd_float4x4 m;
+    m.columns[0] = simd_make_float4(xAxis, 0.0f);
+    m.columns[1] = simd_make_float4(yAxis, 0.0f);
+    m.columns[2] = simd_make_float4(zAxis, 0.0f);
+    m.columns[3] = simd_make_float4(pos, 1.0f);
+    return m;
+}
+
 static void sm64_vr_build_matrices(cp_drawable_t drawable, simd_float4x4 frozenHead,
                                    simd_float4x4 liveHead, bool logIt) {
     const float invS = 1.0f / sVrScale;
@@ -488,10 +527,27 @@ static NSString *const kSM64VRShader =
      "}\n"
      "fragment float4 vr_dim_fs(constant float& dim [[buffer(0)]]) {\n"
      "  return float4(0.0, 0.0, 0.0, dim);\n"
+     "}\n"
+     // Panel mode: the flat frame on a world-locked quad, the same presentation
+     // the shipped 3D mode uses. Opaque, and no black keying — a menu screen is
+     // MEANT to be a screen.
+     "vertex VOut vr_quad_vs(uint vid [[vertex_id]], constant float4x4& mvp [[buffer(0)]]) {\n"
+     "  const float2 p[4] = { float2(-1,-1), float2(1,-1), float2(-1,1), float2(1,1) };\n"
+     "  VOut o; o.pos = mvp * float4(p[vid], 0.0, 1.0);\n"
+     "  o.uv = float2(p[vid].x * 0.5 + 0.5, 0.5 - p[vid].y * 0.5);\n"
+     "  return o;\n"
+     "}\n"
+     "fragment float4 vr_quad_fs(VOut in [[stage_in]], texture2d<float> tex [[texture(0)]],\n"
+     "                           constant float& srgbDecode [[buffer(0)]]) {\n"
+     "  constexpr sampler s(filter::linear, mip_filter::linear, max_anisotropy(16));\n"
+     "  float4 c = tex.sample(s, in.uv);\n"
+     "  if (srgbDecode > 0.5) { c.rgb = pow(c.rgb, float3(2.2)); }\n"
+     "  return float4(c.rgb, 1.0);\n"
      "}\n";
 
 static id<MTLRenderPipelineState> sVrPipeline;
 static id<MTLRenderPipelineState> sVrDimPipeline;
+static id<MTLRenderPipelineState> sVrQuadPipeline;
 static id<MTLDepthStencilState> sVrDepthState;
 // Mipmapped per-eye copies, latched as an atomic pair (see the copy site).
 static id<MTLTexture> sVrEyeCopy[2];
@@ -529,6 +585,14 @@ static void sm64_vr_build_pipeline(id<MTLDevice> dev, MTLPixelFormat colorFmt, M
     dp.depthAttachmentPixelFormat = depthFmt;
     sVrDimPipeline = [dev newRenderPipelineStateWithDescriptor:dp error:&err];
     if (!sVrDimPipeline) { NSLog(@"[vrspike] dim pipeline FAILED: %@", err.localizedDescription); }
+
+    MTLRenderPipelineDescriptor *qp = [MTLRenderPipelineDescriptor new];
+    qp.vertexFunction = [lib newFunctionWithName:@"vr_quad_vs"];
+    qp.fragmentFunction = [lib newFunctionWithName:@"vr_quad_fs"];
+    qp.colorAttachments[0].pixelFormat = colorFmt;
+    qp.depthAttachmentPixelFormat = depthFmt;
+    sVrQuadPipeline = [dev newRenderPipelineStateWithDescriptor:qp error:&err];
+    if (!sVrQuadPipeline) { NSLog(@"[vrspike] quad pipeline FAILED: %@", err.localizedDescription); }
     NSLog(@"[vrspike] world pipeline built (colorFmt=%lu depthFmt=%lu)",
           (unsigned long)colorFmt, (unsigned long)depthFmt);
 }
@@ -841,8 +905,49 @@ void sm64_vr_spike_run(void *layer_renderer_ptr, int variant) {
                     [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
                 }
 
-                // R0.2: paint this eye's engine render over the whole slice.
-                if (sVrWorld && sVrValid && sVrPipeline) {
+                // PANEL MODE (charter A5): the flat frame on a world-locked
+                // quad, anchored where the world was. The projection here is
+                // Apple's OWN (reverse-Z, untouched) because this quad is drawn
+                // by us in the compositor's pass — only the engine needs the
+                // forward-Z rebuild.
+                if (sVrWorld && sVrPanelMode && sVrQuadPipeline && sVrEyeCopy[0]) {
+                    id<MTLTexture> src = sVrEyeCopy[(v < 2) ? v : 0];
+                    if (src == nil) { src = sVrEyeCopy[0]; }
+                    simd_float4x4 cpProj = matrix_identity_float4x4;
+                    if (__builtin_available(visionOS 2.0, *)) {
+                        cpProj = cp_drawable_compute_projection(
+                            drawable, cp_axis_direction_convention_right_up_back, v);
+                    }
+                    simd_float4x4 deviceFromEye = cp_view_get_transform(vw);
+                    simd_float4x4 eyeFromOrigin =
+                        simd_inverse(simd_mul(frozenHead, deviceFromEye));
+
+                    // Sized from the TEXTURE's aspect, so the flat frame fills
+                    // the quad exactly — the engine renders at the VR view's
+                    // shape, and letterboxing it here would just waste panel.
+                    float texAspect = (src.height > 0)
+                        ? (float)src.width / (float)src.height : (16.0f / 9.0f);
+                    float halfH = kVrPanelHalfH, halfW = kVrPanelHalfH * texAspect;
+
+                    simd_float4x4 place = sm64_vr_panel_placement(frozenHead);
+                    simd_float4x4 scaleM = matrix_identity_float4x4;
+                    scaleM.columns[0].x = halfW;
+                    scaleM.columns[1].y = halfH;
+                    simd_float4x4 mvp = simd_mul(cpProj,
+                        simd_mul(eyeFromOrigin, simd_mul(place, scaleM)));
+
+                    float srgbDecode =
+                        (src.pixelFormat == MTLPixelFormatBGRA8Unorm ||
+                         src.pixelFormat == MTLPixelFormatRGBA8Unorm) ? 1.0f : 0.0f;
+                    [enc setRenderPipelineState:sVrQuadPipeline];
+                    [enc setDepthStencilState:sVrDepthState];
+                    [enc setVertexBytes:&mvp length:sizeof(mvp) atIndex:0];
+                    [enc setFragmentBytes:&srgbDecode length:sizeof(srgbDecode) atIndex:0];
+                    [enc setFragmentTexture:src atIndex:0];
+                    [enc drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:4];
+                }
+                // GAMEPLAY: paint this eye's engine render over the whole slice.
+                else if (sVrWorld && sVrValid && sVrPipeline) {
                     id<MTLTexture> src = sVrEyeCopy[(v < 2) ? v : 0];
                     if (src == nil) { src = sVrEyeCopy[0] ? sVrEyeCopy[0] : sVrEyeCopy[1]; }
                     if (src != nil) {

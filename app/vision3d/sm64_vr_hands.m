@@ -94,50 +94,107 @@ static int sLoadOK = 0;
 static int sLoadFail = 0;
 static int sLastAnchorCount = 0;
 
+// Authorization. THE BUG behind "N devices NOT trackable" on 1.1.2.19: nothing
+// ever called ar_session_request_authorization, so accessory tracking was never
+// permitted and — the tell Austin spotted — no permission row ever appeared in
+// visionOS Settings. A load attempted without that authorization fails, and it
+// fails in exactly the same shape as "this device cannot be tracked", which is
+// why the first read of the status line was so misleading.
+//
+// So: request FIRST, load after. Devices that connect before the answer arrives
+// are parked in sPending and loaded when it does.
+static int  sAuthState = 0;   // 0 = not asked / pending, 1 = allowed, -1 = denied
+static bool sAuthAsked = false;
+static GCController *sPending[SM64_VR_MAX_ACCESSORIES];
+static int  sPendingCount = 0;
+
 // ---------------------------------------------------------------------------
 // Registration
 // ---------------------------------------------------------------------------
+API_AVAILABLE(visionos(26.0))
+static void hands_load_device(GCController *c) {
+    if (c == nil) { return; }
+    ar_accessory_load_from_device(c,
+        ^(id<GCDevice> device, bool successful, ar_error_t error, ar_accessory_t accessory) {
+            (void)device;
+            if (!successful || accessory == NULL) {
+                sLoadFail++;
+                NSLog(@"[vrhands] accessory load FAILED for '%@' (category '%@') — "
+                       "no per-hand pose from this device%@",
+                      c.vendorName, c.productCategory,
+                      error ? @"" : @" (no error object)");
+                return;
+            }
+            if (sAccessoryCount >= SM64_VR_MAX_ACCESSORIES) {
+                NSLog(@"[vrhands] accessory table full — ignoring '%s'",
+                      ar_accessory_get_name(accessory));
+                return;
+            }
+            ar_accessory_chirality_t ch = ar_accessory_get_inherent_chirality(accessory);
+            sAccessory[sAccessoryCount] = accessory;
+            sAccessoryDevice[sAccessoryCount] = c;
+            sAccessoryCount++;
+            sLoadOK++;
+            sProviderDirty = true;
+            NSLog(@"[vrhands] accessory LOADED: '%s' chirality=%s from '%@' (category '%@') "
+                   "— %d accessory(s) known",
+                  ar_accessory_get_name(accessory),
+                  ch == ar_accessory_chirality_left  ? "left"
+                : ch == ar_accessory_chirality_right ? "right" : "unspecified",
+                  c.vendorName, c.productCategory, sAccessoryCount);
+        });
+}
+
+// Ask once, then drain whatever queued up while the user was deciding.
+API_AVAILABLE(visionos(26.0))
+static void hands_request_authorization(void) {
+    if (sAuthAsked) { return; }
+    sAuthAsked = true;
+    if (sSession == NULL) { sSession = ar_session_create(); }
+    NSLog(@"[vrhands] requesting accessory-tracking authorization");
+    ar_session_request_authorization(sSession, ar_authorization_type_accessory_tracking,
+        ^(ar_authorization_results_t results, ar_error_t error) {
+            __block int state = -1;
+            if (results != NULL) {
+                ar_authorization_results_enumerate_results(results,
+                    ^bool(ar_authorization_result_t r) {
+                        if (ar_authorization_result_get_authorization_type(r)
+                                == ar_authorization_type_accessory_tracking) {
+                            state = (ar_authorization_result_get_status(r)
+                                     == ar_authorization_status_allowed) ? 1 : -1;
+                        }
+                        return true;
+                    });
+            }
+            sAuthState = state;
+            NSLog(@"[vrhands] accessory-tracking authorization: %s%@",
+                  state == 1 ? "ALLOWED" : "DENIED", error ? @" (with error)" : @"");
+            if (state != 1) { return; }
+            for (int i = 0; i < sPendingCount; i++) { hands_load_device(sPending[i]); }
+            sPendingCount = 0;
+        });
+}
+
 void sm64_vr_hands_register_device(void *gcController) {
     GCController *c = (__bridge GCController *)gcController;
     if (c == nil) { return; }
     if (@available(visionOS 26.0, *)) {
-        ar_accessory_load_from_device(c,
-            ^(id<GCDevice> device, bool successful, ar_error_t error, ar_accessory_t accessory) {
-                (void)device;
-                if (!successful || accessory == NULL) {
-                    // THE ANSWER, if it is no. Logged at the same volume as the
-                    // success case so a device round cannot be ambiguous about it.
-                    sLoadFail++;
-                    NSLog(@"[vrhands] accessory load FAILED for '%@' (category '%@') — "
-                           "no per-hand pose from this device%@",
-                          c.vendorName, c.productCategory,
-                          error ? @"" : @" (no error object)");
-                    return;
-                }
-                if (sAccessoryCount >= SM64_VR_MAX_ACCESSORIES) {
-                    NSLog(@"[vrhands] accessory table full — ignoring '%s'",
-                          ar_accessory_get_name(accessory));
-                    return;
-                }
-                ar_accessory_chirality_t ch = ar_accessory_get_inherent_chirality(accessory);
-                sAccessory[sAccessoryCount] = accessory;
-                sAccessoryDevice[sAccessoryCount] = c;
-                sAccessoryCount++;
-                sLoadOK++;
-                sProviderDirty = true;
-                NSLog(@"[vrhands] accessory LOADED: '%s' chirality=%s from '%@' (category '%@') "
-                       "— %d accessory(s) known",
-                      ar_accessory_get_name(accessory),
-                      ch == ar_accessory_chirality_left  ? "left"
-                    : ch == ar_accessory_chirality_right ? "right" : "unspecified",
-                      c.vendorName, c.productCategory, sAccessoryCount);
-            });
+        hands_request_authorization();
+        if (sAuthState == 1) { hands_load_device(c); return; }
+        if (sAuthState == -1) { return; }   // denied: loading would only fail
+        if (sPendingCount < SM64_VR_MAX_ACCESSORIES) { sPending[sPendingCount++] = c; }
     }
 }
 
 void sm64_vr_hands_forget_device(void *gcController) {
     GCController *c = (__bridge GCController *)gcController;
     if (c == nil) { return; }
+    for (int i = 0; i < sPendingCount; i++) {
+        if (sPending[i] != c) { continue; }
+        for (int j = i; j < sPendingCount - 1; j++) { sPending[j] = sPending[j + 1]; }
+        sPending[--sPendingCount] = nil;
+        break;
+    }
     for (int i = 0; i < sAccessoryCount; i++) {
         if (sAccessoryDevice[i] != c) { continue; }
         for (int j = i; j < sAccessoryCount - 1; j++) {
@@ -164,7 +221,6 @@ API_AVAILABLE(visionos(26.0))
 static void sm64_vr_hands_rebuild_provider(void) {
     sProviderDirty = false;
     sProvider = NULL;
-    sSession = NULL;
     sHandValid[0] = sHandValid[1] = 0;
     if (sAccessoryCount == 0) { return; }
 
@@ -175,8 +231,10 @@ static void sm64_vr_hands_rebuild_provider(void) {
     ar_accessory_tracking_configuration_t cfg = ar_accessory_tracking_configuration_create();
     ar_accessory_tracking_configuration_set_accessories(cfg, set);
 
+    // The SAME session the authorization was granted on — a fresh one would be
+    // unauthorized again.
+    if (sSession == NULL) { sSession = ar_session_create(); }
     sProvider = ar_accessory_tracking_provider_create(cfg);
-    sSession  = ar_session_create();
     ar_data_providers_t providers = ar_data_providers_create_with_data_providers(sProvider, NULL);
     ar_session_run(sSession, providers);
     NSLog(@"[vrhands] accessory tracking session running with %d accessory(s)", sAccessoryCount);
@@ -287,10 +345,15 @@ int sm64_vr_hand_matrix(int hand, float out[4][4]) {
 // than only in a Mac console.
 void sm64_vr_hands_status(char *buf, int len) {
     if (buf == NULL || len <= 0) { return; }
-    if (sLoadOK == 0 && sLoadFail == 0) {
-        snprintf(buf, (size_t) len, "Hands: no controller seen yet");
+    if (sAuthState == -1) {
+        snprintf(buf, (size_t) len, "Hands: permission DENIED");
+    } else if (sAuthState == 0) {
+        snprintf(buf, (size_t) len, "Hands: awaiting permission%s",
+                 sAuthAsked ? "" : " (not asked)");
+    } else if (sLoadOK == 0 && sLoadFail == 0) {
+        snprintf(buf, (size_t) len, "Hands: allowed, no controller seen");
     } else if (sLoadOK == 0) {
-        snprintf(buf, (size_t) len, "Hands: %d device(s) NOT trackable", sLoadFail);
+        snprintf(buf, (size_t) len, "Hands: allowed, %d device(s) NOT trackable", sLoadFail);
     } else {
         snprintf(buf, (size_t) len, "Hands: %d loaded, %d anchor(s), %s%s",
                  sLoadOK, sLastAnchorCount,

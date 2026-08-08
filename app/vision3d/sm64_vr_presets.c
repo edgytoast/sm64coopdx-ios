@@ -58,8 +58,14 @@ const char *sm64_vr_preset_name(int i) {
     return (i >= 0 && i < SM64_VR_PRESET_COUNT) ? sPresets[i].name : "";
 }
 
+// Default FIRST-PERSON on a fresh install (Austin, 2026-08-08). The charter's
+// provisional default was Diorama on comfort grounds, but comfort is what the
+// mode switch is for, and first-person is the mode the whole R4 phase exists to
+// deliver — a new player should meet it, not have to go find it.
+#define SM64_VR_PRESET_DEFAULT 2   // index of "First-person" in sPresets
+
 int sm64_vr_preset_get(void) {
-    int idx = (int) sm64_3d_setting_f("vrPreset", 0.0f);
+    int idx = (int) sm64_3d_setting_f("vrPreset", (float) SM64_VR_PRESET_DEFAULT);
     if (idx < 0 || idx >= SM64_VR_PRESET_COUNT) { idx = 0; }
     return idx;
 }

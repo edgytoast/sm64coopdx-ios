@@ -68,10 +68,14 @@ bool sm64_vr_frame_is_nongameplay(void) {
     // screen the way it is meant to.
     if (gWarpTransition.isActive)  { return true; }
     if (gDjuiInMainMenu)           { return true; }  // title / main menu / connect / options
-    // The VR panel is the ONE menu that stays in the world: its sliders describe
-    // the world, and you cannot judge a world you just replaced with a menu.
-    if (sm64_vr_spike_menu_over_world()) { return false; }
-    if (djui_panel_is_active())    { return true; }  // every other in-game menu
+    // The VR panel USED to be the one menu that stayed in the world, on the
+    // reasoning that you cannot judge a world you have just replaced with a menu.
+    // Austin overruled that on device (2026-08-08): keeping it in the world meant
+    // it rode the head-locked HUD plane and so was the only menu that moved with
+    // your head, which read as a bug next to every other menu sitting flat and
+    // still. Consistency wins — a menu you have to chase is worse than a slider
+    // you have to close to judge.
+    if (djui_panel_is_active())    { return true; }  // every in-game menu, VR panel included
     if (gCurrCreditsEntry != NULL) { return true; }  // credits / ending
     if (gCurrDemoInput != NULL)    { return true; }  // attract-mode demo
     if (gMenuMode != -1)           { return true; }  // pause star grid / course complete
@@ -159,7 +163,9 @@ void sm64_vr_update_flip_cam(void) {
     wasFlipping = flipping;
 
     if (flipping && angle < VR_FLIP_TWO_PI) {
-        float dir = (a == ACT_BACKFLIP) ? 1.0f : -1.0f;
+        // Both signs negated 2026-08-08: on device the view somersaulted
+        // OPPOSITE to Mario for the triple jump AND the backflip.
+        float dir = (a == ACT_BACKFLIP) ? -1.0f : 1.0f;
         angle += (VR_FLIP_TWO_PI / VR_FLIP_SECONDS) * dt;
         if (angle >= VR_FLIP_TWO_PI) { angle = VR_FLIP_TWO_PI; }
         sm64_vr_set_flip(dir * angle, side);
@@ -170,7 +176,7 @@ void sm64_vr_update_flip_cam(void) {
         // rewinding, so the view finishes the way the body did.
         angle += (VR_FLIP_TWO_PI / VR_FLIP_SECONDS) * dt;
         if (angle >= VR_FLIP_TWO_PI) { angle = 0.0f; }
-        float dir = side ? -1.0f : 1.0f;
+        float dir = side ? 1.0f : -1.0f;
         sm64_vr_set_flip(angle == 0.0f ? 0.0f : dir * angle, side);
         return;
     }

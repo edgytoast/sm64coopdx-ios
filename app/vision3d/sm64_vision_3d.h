@@ -120,6 +120,13 @@ void *sm64_metal_get_sdl_uiview(void);
 // ---------------------------------------------------------------------------
 void sm64_gfx_set_3d_params(float separation, float convergence, float hud_depth);
 
+// MSAA for the VR eye passes (gfx_metal.mm). 1 = off; 2/4/8 are validated
+// against the device. The flat panel deliberately stays at 1: it already
+// supersamples ~2.7x, which antialiases better than MSAA for free. VR covers a
+// whole field of view at ~0.85x, so it has no such margin — this is the cheapest
+// way to kill the edge shimmer there.
+void gfx_metal_set_msaa(int samples);
+
 // ---------------------------------------------------------------------------
 // Panel + loop — implemented in sm64_immersive.m.
 // ---------------------------------------------------------------------------
@@ -199,6 +206,24 @@ void sm64_3d_frame_poll(void);
 // Settings storage (NSUserDefaults-backed; shared with the settings table).
 float sm64_3d_setting_f(const char *key, float def);
 void  sm64_3d_setting_set_f(const char *key, float val);
+
+// Push the stored settings into the live panel/stereo/VR state (sm64_vision_host.m).
+void sm64_3d_apply_settings(void);
+
+// ---------------------------------------------------------------------------
+// VR defaults live HERE, not in sm64_vision_host.h with the panel's, for one
+// reason: the in-game DJUI VR panel is plain C and cannot include that header
+// (it imports UIKit). Both menus therefore read one set of numbers, which is the
+// same "one source of truth" rule the panel defaults already follow.
+// ---------------------------------------------------------------------------
+#define SM64_DEF_VRSCALE     1376.0f // game units per metre (bigger = smaller world)
+#define SM64_DEF_VRDIST      0.60f   // metres in front of the anchored head
+#define SM64_DEF_VRHEIGHT   (-0.35f) // metres relative to eye level
+#define SM64_DEF_VRSTEREO    1.00f   // eye offset as a fraction of the true IPD
+#define SM64_DEF_VRRENDER    0.85f   // eye render size as a fraction of the per-eye view
+#define SM64_DEF_VRWORLDLOCK 1.0f    // 1 = look around the world; 0 = it follows your head
+#define SM64_DEF_VRDIM       1.00f   // surroundings dimming; 1.0 = no passthrough
+#define SM64_DEF_VRMSAA      4.0f    // VR eye-pass MSAA: 1 = off, else 2/4/8
 
 #ifdef __cplusplus
 }

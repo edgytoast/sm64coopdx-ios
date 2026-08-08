@@ -105,6 +105,14 @@ struct ShaderProgram {
     bool used_lightmap;
     bool world_geometry;
     id<MTLRenderPipelineState> pipeline_state;
+    // MSAA variant (VR only — see gfx_metal_set_msaa). A pipeline bakes its
+    // rasterSampleCount, so a multisampled pass needs its own PSO. Built lazily
+    // from the kept descriptor and rebuilt when the sample count changes, which
+    // avoids invalidating the pool — gfx_pc caches these pointers, so clearing
+    // the pool out from under it would leave dangling programs.
+    id<MTLRenderPipelineState> pipeline_state_msaa;
+    MTLRenderPipelineDescriptor *pdesc;
+    int msaa_of_variant;
 };
 
 struct MetalTexture {
@@ -236,6 +244,15 @@ static int stereo_active = 0;
 extern "C" int sm64_gfx_3d_eye;
 static id<MTLTexture> stereo_eye_tex[2] = { nil, nil };
 static id<MTLTexture> stereo_depth_tex = nil;
+// MSAA (VR eye passes only). The panel path deliberately keeps 1 sample: it
+// already supersamples ~2.7x, which antialiases better than MSAA for free. VR
+// cannot afford that ratio (it covers a whole field of view, not a panel), so
+// this is where MSAA earns its keep — 4x costs far less than the 2x resolution
+// it substitutes for, and edge shimmer is exactly what it removes.
+static id<MTLTexture> stereo_msaa_tex = nil;   // multisampled colour, resolved to the eye texture
+static id<MTLTexture> stereo_msaa_depth = nil; // multisampled depth, never stored
+static int mtl_msaa_samples = 1;               // requested; 1 = off
+static int cur_pass_samples = 1;               // what the OPEN pass actually has
 // Per-eye "has ever been rendered since entering 3D". An eye texture that has
 // never been rendered holds UNDEFINED garbage — the guide's explicit trap. The
 // accessor below gates on this, so the loop cannot sample it early.
@@ -263,6 +280,28 @@ extern "C" void sm64_metal_set_3d_mode(int on) {
 }
 
 extern "C" int sm64_metal_get_3d_mode(void) { return stereo_active; }
+
+// Requested MSAA for the VR eye passes. Validated against the device rather than
+// trusted: an unsupported sample count is a pipeline-creation abort, not a soft
+// failure. 1 disables it.
+extern "C" void gfx_metal_set_msaa(int samples) {
+    int want = 1;
+    if (samples >= 8) { want = 8; }
+    else if (samples >= 4) { want = 4; }
+    else if (samples >= 2) { want = 2; }
+    if (want > 1 && mtl_device != nil && ![mtl_device supportsTextureSampleCount:want]) {
+        fprintf(stderr, "gfx_metal: MSAA %dx unsupported, falling back to off\n", want);
+        want = 1;
+    }
+    if (want != mtl_msaa_samples) {
+        fprintf(stderr, "gfx_metal: VR MSAA -> %dx\n", want);
+        mtl_msaa_samples = want;
+        // Drop the multisampled targets; they are reallocated at the sample
+        // count on the next 3D frame.
+        stereo_msaa_tex = nil;
+        stereo_msaa_depth = nil;
+    }
+}
 
 extern "C" void *sm64_metal_get_3d_eye_texture(int eye) {
     const int i = stereo_idx(eye);
@@ -999,6 +1038,9 @@ static struct ShaderProgram *gfx_metal_create_and_load_new_shader(struct ColorCo
     prg->used_lightmap = opt_light_map;
     prg->world_geometry = world_geometry;
     prg->pipeline_state = pso;
+    prg->pdesc = pdesc;              // kept so an MSAA variant can be built later
+    prg->pipeline_state_msaa = nil;
+    prg->msaa_of_variant = 0;
 
     gfx_metal_load_shader(prg);
     return prg;
@@ -1222,7 +1264,27 @@ static void gfx_metal_draw_triangles(float buf_vbo[], size_t buf_vbo_len, size_t
         [cur_encoder setFragmentSamplerState:smp atIndex:i];
     }
 
-    [cur_encoder setRenderPipelineState:cur_shader->pipeline_state];
+    // Pick the pipeline that matches the OPEN pass's sample count. Building the
+    // MSAA variant lazily here (rather than up front for every shader) keeps the
+    // cost proportional to what a VR frame actually draws.
+    id<MTLRenderPipelineState> pso = cur_shader->pipeline_state;
+    if (cur_pass_samples > 1 && cur_shader->pdesc != nil) {
+        if (cur_shader->pipeline_state_msaa == nil ||
+            cur_shader->msaa_of_variant != cur_pass_samples) {
+            NSError *perr = nil;
+            cur_shader->pdesc.rasterSampleCount = cur_pass_samples;
+            cur_shader->pipeline_state_msaa =
+                [mtl_device newRenderPipelineStateWithDescriptor:cur_shader->pdesc error:&perr];
+            cur_shader->pdesc.rasterSampleCount = 1; // leave the descriptor as it was
+            cur_shader->msaa_of_variant = cur_pass_samples;
+            if (cur_shader->pipeline_state_msaa == nil) {
+                fprintf(stderr, "gfx_metal: MSAA pipeline failed (%s) — drawing without it\n",
+                        perr ? [[perr localizedDescription] UTF8String] : "unknown");
+            }
+        }
+        if (cur_shader->pipeline_state_msaa != nil) { pso = cur_shader->pipeline_state_msaa; }
+    }
+    [cur_encoder setRenderPipelineState:pso];
     [cur_encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:buf_vbo_num_tris * 3];
 }
 
@@ -1268,6 +1330,8 @@ static void gfx_metal_on_resize(void) {
 
 static void gfx_metal_end_frame(void);
 static void gfx_metal_begin_pass(id<MTLTexture> color_tex, id<MTLTexture> depth_tex);
+static void gfx_metal_begin_pass_msaa(id<MTLTexture> msaa_color, id<MTLTexture> msaa_depth,
+                                      id<MTLTexture> resolve_tex);
 
 #if TARGET_OS_VISION
 // Offscreen per-eye start_frame: the 3D counterpart of the drawable path below.
@@ -1330,8 +1394,54 @@ static void gfx_metal_start_frame_3d(void) {
         stereo_depth_tex = [mtl_device newTextureWithDescriptor:td];
     }
 
+    // MSAA: render into a multisampled pair and RESOLVE into the eye texture.
+    // Both multisampled targets are MEMORYLESS — they never leave tile memory,
+    // because the colour is resolved in-tile and the depth is discarded. That is
+    // what makes 4x affordable here: the bandwidth cost of the extra samples is
+    // the part MSAA usually pays for, and on this GPU we do not pay it.
+    if (mtl_msaa_samples > 1) {
+        if (stereo_msaa_tex == nil ||
+            (int)stereo_msaa_tex.width != dw || (int)stereo_msaa_tex.height != dh ||
+            (int)stereo_msaa_tex.sampleCount != mtl_msaa_samples) {
+            MTLTextureDescriptor *md = [[MTLTextureDescriptor alloc] init];
+            md.textureType = MTLTextureType2DMultisample;
+            md.pixelFormat = MTLPixelFormatBGRA8Unorm;
+            md.width = (NSUInteger)dw;
+            md.height = (NSUInteger)dh;
+            md.sampleCount = (NSUInteger)mtl_msaa_samples;
+            md.usage = MTLTextureUsageRenderTarget;
+            md.storageMode = MTLStorageModeMemoryless;
+            stereo_msaa_tex = [mtl_device newTextureWithDescriptor:md];
+
+            MTLTextureDescriptor *dd = [[MTLTextureDescriptor alloc] init];
+            dd.textureType = MTLTextureType2DMultisample;
+            dd.pixelFormat = MTLPixelFormatDepth32Float;
+            dd.width = (NSUInteger)dw;
+            dd.height = (NSUInteger)dh;
+            dd.sampleCount = (NSUInteger)mtl_msaa_samples;
+            dd.usage = MTLTextureUsageRenderTarget;
+            dd.storageMode = MTLStorageModeMemoryless;
+            stereo_msaa_depth = [mtl_device newTextureWithDescriptor:dd];
+
+            if (stereo_msaa_tex == nil || stereo_msaa_depth == nil) {
+                fprintf(stderr, "gfx_metal: MSAA %dx targets %dx%d FAILED — off\n",
+                        mtl_msaa_samples, dw, dh);
+                mtl_msaa_samples = 1;
+                stereo_msaa_tex = nil;
+                stereo_msaa_depth = nil;
+            } else {
+                fprintf(stderr, "gfx_metal: VR MSAA %dx targets %dx%d (memoryless)\n",
+                        mtl_msaa_samples, dw, dh);
+            }
+        }
+    }
+
     dispatch_semaphore_wait(frame_sem, DISPATCH_TIME_FOREVER);
-    gfx_metal_begin_pass(color_tex, stereo_depth_tex);
+    if (mtl_msaa_samples > 1 && stereo_msaa_tex != nil && stereo_msaa_depth != nil) {
+        gfx_metal_begin_pass_msaa(stereo_msaa_tex, stereo_msaa_depth, color_tex);
+    } else {
+        gfx_metal_begin_pass(color_tex, stereo_depth_tex);
+    }
 }
 #endif // TARGET_OS_VISION
 
@@ -1435,7 +1545,23 @@ static void gfx_metal_start_frame(void) {
 // (drawable) and 3D (offscreen eye) paths. Factored rather than copied so the
 // two paths cannot silently drift apart: everything gfx_pc.c depends on being
 // re-established at a frame boundary lives here exactly once.
+static void gfx_metal_begin_pass_full(id<MTLTexture> color_tex, id<MTLTexture> depth_tex,
+                                      id<MTLTexture> resolve_tex);
+
 static void gfx_metal_begin_pass(id<MTLTexture> color_tex, id<MTLTexture> depth_tex) {
+    gfx_metal_begin_pass_full(color_tex, depth_tex, nil);
+}
+
+// The multisampled VR variant: same body, plus the resolve target. Factored
+// through one function for the same reason the 2D/3D split already is — so the
+// paths cannot silently drift apart.
+static void gfx_metal_begin_pass_msaa(id<MTLTexture> msaa_color, id<MTLTexture> msaa_depth,
+                                      id<MTLTexture> resolve_tex) {
+    gfx_metal_begin_pass_full(msaa_color, msaa_depth, resolve_tex);
+}
+
+static void gfx_metal_begin_pass_full(id<MTLTexture> color_tex, id<MTLTexture> depth_tex,
+                                      id<MTLTexture> resolve_tex) {
     // GL's start_frame clears colour+depth with the scissor test disabled
     // (gfx_opengl.c:862-870); a Clear load action is the exact equivalent and
     // is likewise unaffected by the scissor rect.
@@ -1443,7 +1569,13 @@ static void gfx_metal_begin_pass(id<MTLTexture> color_tex, id<MTLTexture> depth_
     rpd.colorAttachments[0].texture = color_tex;
     rpd.colorAttachments[0].loadAction = MTLLoadActionClear;
     rpd.colorAttachments[0].clearColor = MTLClearColorMake(0.0, 0.0, 0.0, 1.0);
-    rpd.colorAttachments[0].storeAction = MTLStoreActionStore;
+    if (resolve_tex != nil) {
+        rpd.colorAttachments[0].resolveTexture = resolve_tex;
+        rpd.colorAttachments[0].storeAction = MTLStoreActionMultisampleResolve;
+    } else {
+        rpd.colorAttachments[0].storeAction = MTLStoreActionStore;
+    }
+    cur_pass_samples = (int)color_tex.sampleCount;
     rpd.depthAttachment.texture = depth_tex;
     rpd.depthAttachment.loadAction = MTLLoadActionClear;
     rpd.depthAttachment.clearDepth = 1.0;

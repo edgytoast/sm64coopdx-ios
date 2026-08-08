@@ -123,7 +123,7 @@ WHAT IS NOT TOUCHED
 
 --- /dev/null
 +++ b/src/pc/vision3d/sm64_vision_3d.h
-@@ -0,0 +1,208 @@
+@@ -0,0 +1,233 @@
 +#ifndef SM64_VISION_3D_H
 +#define SM64_VISION_3D_H
 +
@@ -246,6 +246,13 @@ WHAT IS NOT TOUCHED
 +// ---------------------------------------------------------------------------
 +void sm64_gfx_set_3d_params(float separation, float convergence, float hud_depth);
 +
++// MSAA for the VR eye passes (gfx_metal.mm). 1 = off; 2/4/8 are validated
++// against the device. The flat panel deliberately stays at 1: it already
++// supersamples ~2.7x, which antialiases better than MSAA for free. VR covers a
++// whole field of view at ~0.85x, so it has no such margin — this is the cheapest
++// way to kill the edge shimmer there.
++void gfx_metal_set_msaa(int samples);
++
 +// ---------------------------------------------------------------------------
 +// Panel + loop — implemented in sm64_immersive.m.
 +// ---------------------------------------------------------------------------
@@ -326,6 +333,24 @@ WHAT IS NOT TOUCHED
 +float sm64_3d_setting_f(const char *key, float def);
 +void  sm64_3d_setting_set_f(const char *key, float val);
 +
++// Push the stored settings into the live panel/stereo/VR state (sm64_vision_host.m).
++void sm64_3d_apply_settings(void);
++
++// ---------------------------------------------------------------------------
++// VR defaults live HERE, not in sm64_vision_host.h with the panel's, for one
++// reason: the in-game DJUI VR panel is plain C and cannot include that header
++// (it imports UIKit). Both menus therefore read one set of numbers, which is the
++// same "one source of truth" rule the panel defaults already follow.
++// ---------------------------------------------------------------------------
++#define SM64_DEF_VRSCALE     1376.0f // game units per metre (bigger = smaller world)
++#define SM64_DEF_VRDIST      0.60f   // metres in front of the anchored head
++#define SM64_DEF_VRHEIGHT   (-0.35f) // metres relative to eye level
++#define SM64_DEF_VRSTEREO    1.00f   // eye offset as a fraction of the true IPD
++#define SM64_DEF_VRRENDER    0.85f   // eye render size as a fraction of the per-eye view
++#define SM64_DEF_VRWORLDLOCK 1.0f    // 1 = look around the world; 0 = it follows your head
++#define SM64_DEF_VRDIM       1.00f   // surroundings dimming; 1.0 = no passthrough
++#define SM64_DEF_VRMSAA      4.0f    // VR eye-pass MSAA: 1 = off, else 2/4/8
++
 +#ifdef __cplusplus
 +}
 +#endif
@@ -334,7 +359,7 @@ WHAT IS NOT TOUCHED
 +#endif // SM64_VISION_3D_H
 --- /dev/null
 +++ b/src/pc/vision3d/sm64_vision_host.h
-@@ -0,0 +1,87 @@
+@@ -0,0 +1,68 @@
 +#ifndef SM64_VISION_HOST_H
 +#define SM64_VISION_HOST_H
 +
@@ -382,27 +407,8 @@ WHAT IS NOT TOUCHED
 +#define SM64_DEF_DIM      0.8f
 +#define SM64_DEF_UNITS    1.0f    // 0 = metres, 1 = feet
 +
-+// R0 SPIKE (throwaway) — VR world placement, the donor's Diorama preset
-+// (vr.c:1503) including the two comfort levers the first device build lacked.
-+// vrStereo is the one that matters most: the donor's own comment calls 1.0
-+// "true IPD" and lower "gentler stereo / less cross-eye", and every donor preset
-+// ships 0.50. Live-draggable because the donor's numbers are annotated "tuned by
-+// feel" and the headset is the only instrument that counts.
-+#define SM64_DEF_VRSCALE  1376.0f // game units per metre (bigger = smaller world)
-+#define SM64_DEF_VRDIST   0.60f   // metres in front of the frozen head (donor ships 0.25; Austin's device report was "very close up to my face", so the FIRST look starts further out and the slider goes back down to 0.30)
-+#define SM64_DEF_VRHEIGHT (-0.35f)// metres relative to eye level
-+#define SM64_DEF_VRRENDER 0.85f   // eye render size as a fraction of the per-eye view.
-+                                  // 1.0 is 1:1 with the compositor at ~2.5x today's GPU
-+                                  // cost; below 1.0 upsamples and shows jaggies. The flat
-+                                  // panel supersamples 2.7x, which is why it looks better.
-+#define SM64_DEF_VRWORLDLOCK 1.0f // 1 = look around the world; 0 = it follows your head
-+#define SM64_DEF_VRDIM    1.00f   // surroundings dimming; 1.0 = no passthrough (Austin's default)
-+#define SM64_DEF_VRSTEREO 1.00f   // eye offset as a fraction of the true IPD. 1.0 is the
-+                                  // GEOMETRICALLY TRUE setting and is now the default: with each
-+                                  // eye's canted frustum intact, anything below 1.0 is just a
-+                                  // smaller-IPD person (less parallax, still fused), and 0.0 must
-+                                  // give a FLAT BUT SINGLE image. The donor's 0.50 is a comfort
-+                                  // choice on a miniature world, not a fix for doubling.
++// (The VR defaults live in sm64_vision_3d.h — the in-game DJUI panel is plain C
++// and cannot include this header, which imports UIKit.)
 +
 +// Boots the SDL/coopdx engine under the SwiftUI app entry and owns the 2D<->3D
 +// transition sequencing. Hosted in the SwiftUI WindowGroup (see SM64VisionApp.swift).
@@ -424,7 +430,7 @@ WHAT IS NOT TOUCHED
 +#endif // SM64_VISION_HOST_H
 --- /dev/null
 +++ b/src/pc/vision3d/sm64_vision_host.m
-@@ -0,0 +1,674 @@
+@@ -0,0 +1,680 @@
 +// sm64_vision_host.m — boots the SDL/coopdx engine under the SwiftUI app entry
 +// (visionOS only) and owns the 2D<->3D transition sequencing.
 +//
@@ -531,6 +537,7 @@ WHAT IS NOT TOUCHED
 +    sm64_vr_spike_set_render_scale(sm64_3d_setting_f("vrRender", SM64_DEF_VRRENDER));
 +    sm64_vr_spike_set_world_lock((int)(sm64_3d_setting_f("vrLock", SM64_DEF_VRWORLDLOCK) > 0.5f));
 +    sm64_vr_spike_set_dim(sm64_3d_setting_f("vrDim", SM64_DEF_VRDIM));
++    gfx_metal_set_msaa((int)sm64_3d_setting_f("vrMsaa", SM64_DEF_VRMSAA));
 +}
 +
 +// ---------------------------------------------------------------------------
@@ -929,6 +936,11 @@ WHAT IS NOT TOUCHED
 +                }
 +            }
 +        }
++        // Push the stored settings BEFORE the first VR frame, exactly as the 3D
++        // path does. Without this, entering VR used whatever the C statics
++        // happened to hold and a tuned value only took effect once a slider was
++        // touched — which also meant MSAA was never applied at all.
++        sm64_3d_apply_settings();
 +        sm64_vr_spike_variant = variant;
 +        sm64_3d_on = 1;
 +        sm64_metal_set_3d_mode(1);
@@ -3849,6 +3861,171 @@ WHAT IS NOT TOUCHED
 +}
 +
 +#endif // SM64_VISION_3D
+--- /dev/null
++++ b/src/pc/vision3d/djui_panel_vr.h
+@@ -0,0 +1,30 @@
++#ifndef DJUI_PANEL_VR_H
++#define DJUI_PANEL_VR_H
++
++// The in-game VR options panel (Options -> VR), modelled on the donor's
++// djui_panel_vr.c. Pulled forward from the charter's R2 at Austin's request
++// (2026-08-07): inside the headset the flat window's settings sheet is not
++// somewhere you want to reach, and every one of these controls describes the
++// thing you are currently looking at.
++//
++// THE DIVISION OF LABOUR, so a setting never has two homes:
++//   this panel        — the VR presentation you are inside (world placement,
++//                       stereo, sharpness, dimming, world lock, recenter)
++//   the visionOS sheet — the flat 3D PANEL's own settings (screen size,
++//                       distance, focus), which you tune while looking at it
++// Both read and write ONE store (sm64_3d_setting_f / _set_f), so they cannot
++// disagree; this panel is a second view onto the same values, not a second copy.
++//
++// Plain C on purpose: DJUI is engine code compiled for every platform, so this
++// file must not touch UIKit. It self-gates on SM64_VISION_3D, which is how it
++// stays absent from iOS and desktop builds entirely.
++
++#include "pc/vision3d/sm64_vision_3d.h"
++
++#ifdef SM64_VISION_3D
++
++struct DjuiBase;
++void djui_panel_vr_create(struct DjuiBase *caller);
++
++#endif // SM64_VISION_3D
++#endif // DJUI_PANEL_VR_H
+--- /dev/null
++++ b/src/pc/vision3d/djui_panel_vr.c
+@@ -0,0 +1,129 @@
++// djui_panel_vr.c — the in-game VR options panel (Options -> VR).
++//
++// See djui_panel_vr.h for why this exists and what belongs here rather than in
++// the visionOS settings sheet.
++//
++// DJUI sliders carry `unsigned int` and no unit, so every row below keeps its
++// value in whatever integer unit READS best in the menu (centimetres, percent,
++// game-units-per-metre) and converts on the way in and out. The store is the
++// shell's, shared with the sheet — this panel never keeps state of its own
++// beyond the widget mirrors, so opening it always shows the truth.
++
++#include "pc/vision3d/djui_panel_vr.h"
++
++#ifdef SM64_VISION_3D
++
++#include "pc/djui/djui.h"
++#include "pc/djui/djui_panel.h"
++#include "pc/djui/djui_panel_menu.h"
++#include "pc/vision3d/sm64_vr_spike.h"
++
++// Widget mirrors, in menu units.
++static unsigned int sUiScale;    // game units per metre (a bigger world number = a smaller world)
++static unsigned int sUiDist;     // centimetres in front of you
++static unsigned int sUiHeight;   // centimetres, offset by VR_HEIGHT_BIAS so the slider can go negative
++static unsigned int sUiStereo;   // percent of a true IPD
++static unsigned int sUiRender;   // percent of the per-eye view resolution
++static unsigned int sUiDim;      // percent
++static unsigned int sUiMsaa;     // index into sMsaaChoices
++static bool sUiWorldLock;
++
++// DJUI sliders are unsigned, and the world can sit BELOW eye level (it usually
++// should — you look down at a diorama), so the height row carries a bias.
++#define VR_HEIGHT_BIAS 150   // slider 0..200 == -1.50 m .. +0.50 m
++
++static const int sMsaaSamples[] = { 1, 2, 4, 8 };
++#define VR_MSAA_COUNT ((int)(sizeof(sMsaaSamples) / sizeof(sMsaaSamples[0])))
++
++static unsigned int vr_msaa_index_of(int samples) {
++    for (int i = 0; i < VR_MSAA_COUNT; i++) {
++        if (sMsaaSamples[i] == samples) { return (unsigned int) i; }
++    }
++    return 0;
++}
++
++// Read the store into the widget mirrors. Called at panel creation so the rows
++// always show what is actually live, including anything changed from the sheet.
++static void vr_panel_pull(void) {
++    sUiScale     = (unsigned int) sm64_3d_setting_f("vrScale", SM64_DEF_VRSCALE);
++    sUiDist      = (unsigned int) (sm64_3d_setting_f("vrDist", SM64_DEF_VRDIST) * 100.0f);
++    sUiHeight    = (unsigned int) (sm64_3d_setting_f("vrHeight", SM64_DEF_VRHEIGHT) * 100.0f
++                                   + VR_HEIGHT_BIAS);
++    sUiStereo    = (unsigned int) (sm64_3d_setting_f("vrStereo", SM64_DEF_VRSTEREO) * 100.0f);
++    sUiRender    = (unsigned int) (sm64_3d_setting_f("vrRender", SM64_DEF_VRRENDER) * 100.0f);
++    sUiDim       = (unsigned int) (sm64_3d_setting_f("vrDim", SM64_DEF_VRDIM) * 100.0f);
++    sUiMsaa      = vr_msaa_index_of((int) sm64_3d_setting_f("vrMsaa", SM64_DEF_VRMSAA));
++    sUiWorldLock = sm64_3d_setting_f("vrLock", SM64_DEF_VRWORLDLOCK) > 0.5f;
++}
++
++// Write the mirrors back and apply. Applying LIVE is the whole point: these are
++// numbers you can only judge by looking at the world while you drag them, which
++// is exactly how the donor's were tuned.
++static void vr_panel_push(UNUSED struct DjuiBase *caller) {
++    sm64_3d_setting_set_f("vrScale", (float) sUiScale);
++    sm64_3d_setting_set_f("vrDist", (float) sUiDist / 100.0f);
++    sm64_3d_setting_set_f("vrHeight", ((float) sUiHeight - VR_HEIGHT_BIAS) / 100.0f);
++    sm64_3d_setting_set_f("vrStereo", (float) sUiStereo / 100.0f);
++    sm64_3d_setting_set_f("vrRender", (float) sUiRender / 100.0f);
++    sm64_3d_setting_set_f("vrDim", (float) sUiDim / 100.0f);
++    sm64_3d_setting_set_f("vrLock", sUiWorldLock ? 1.0f : 0.0f);
++    if (sUiMsaa < (unsigned int) VR_MSAA_COUNT) {
++        sm64_3d_setting_set_f("vrMsaa", (float) sMsaaSamples[sUiMsaa]);
++    }
++    sm64_3d_apply_settings();
++}
++
++static void vr_panel_recenter(UNUSED struct DjuiBase *caller) {
++    sm64_vr_spike_recenter();
++}
++
++static void vr_panel_reset(UNUSED struct DjuiBase *caller) {
++    sm64_3d_setting_set_f("vrScale", SM64_DEF_VRSCALE);
++    sm64_3d_setting_set_f("vrDist", SM64_DEF_VRDIST);
++    sm64_3d_setting_set_f("vrHeight", SM64_DEF_VRHEIGHT);
++    sm64_3d_setting_set_f("vrStereo", SM64_DEF_VRSTEREO);
++    sm64_3d_setting_set_f("vrRender", SM64_DEF_VRRENDER);
++    sm64_3d_setting_set_f("vrDim", SM64_DEF_VRDIM);
++    sm64_3d_setting_set_f("vrLock", SM64_DEF_VRWORLDLOCK);
++    sm64_3d_setting_set_f("vrMsaa", SM64_DEF_VRMSAA);
++    vr_panel_pull();
++    sm64_3d_apply_settings();
++    // No panel rebuild: DJUI sliders read *value when they RENDER
++    // (djui_slider.c:135), so restoring the mirrors moves the bars on their own.
++    // Tearing the panel down and re-adding it from inside a button callback
++    // would mean using `caller` after its own panel was freed.
++}
++
++void djui_panel_vr_create(struct DjuiBase *caller) {
++    vr_panel_pull();
++
++    struct DjuiThreePanel *panel = djui_panel_menu_create("VR", false);
++    struct DjuiBase *body = djui_three_panel_get_body(panel);
++    {
++        // Placement first: this is what people reach for, and it is the group
++        // that decides whether the world feels like a toy on a table or a room
++        // you are standing in.
++        djui_slider_create(body, "World Size", &sUiScale, 300, 6000, vr_panel_push);
++        djui_slider_create(body, "World Distance", &sUiDist, 30, 300, vr_panel_push);
++        djui_slider_create(body, "World Height", &sUiHeight, 0, 200, vr_panel_push);
++        djui_checkbox_create(body, "World Lock", &sUiWorldLock, vr_panel_push);
++
++        // Comfort and image.
++        djui_slider_create(body, "Stereo Depth", &sUiStereo, 0, 100, vr_panel_push);
++        djui_slider_create(body, "Surroundings Dimming", &sUiDim, 0, 100, vr_panel_push);
++        djui_slider_create(body, "Render Scale", &sUiRender, 40, 120, vr_panel_push);
++        {
++            char *choices[VR_MSAA_COUNT] = { "Off", "2x", "4x", "8x" };
++            djui_selectionbox_create(body, "Antialiasing", choices, VR_MSAA_COUNT,
++                                     &sUiMsaa, vr_panel_push);
++        }
++
++        djui_button_create(body, "Recenter World", DJUI_BUTTON_STYLE_NORMAL, vr_panel_recenter);
++        djui_button_create(body, "Reset to Default", DJUI_BUTTON_STYLE_NORMAL, vr_panel_reset);
++        djui_button_create(body, DLANG(MENU, BACK), DJUI_BUTTON_STYLE_BACK, djui_panel_menu_back);
++    }
++
++    djui_panel_add(caller, panel, NULL);
++}
++
++#endif // SM64_VISION_3D
 --- a/src/pc/gfx/gfx_pc.c
 +++ b/src/pc/gfx/gfx_pc.c
 @@ -657,8 +657,184 @@
@@ -4174,6 +4351,29 @@ WHAT IS NOT TOUCHED
          case G_TEXCLIP_DJUI:
              djui_gfx_dp_set_clipping(C0(16, 8), C0(8, 8), C1(16, 8), C1(8, 8));
              break;
+--- a/src/pc/djui/djui_panel_options.c
++++ b/src/pc/djui/djui_panel_options.c
+@@ -8,6 +8,9 @@
+ #include "djui_panel_misc.h"
+ #include "djui_panel_menu.h"
+ #include "djui_panel_dynos.h"
++// visionOS VR options (overlay 0011). The header self-gates, so this include
++// costs nothing on any other platform.
++#include "pc/vision3d/djui_panel_vr.h"
+ #include "pc/network/network.h"
+ #include "pc/utils/misc.h"
+ #include "pc/pc_main.h"
+@@ -31,6 +34,10 @@
+         djui_button_create(body, DLANG(OPTIONS, CAMERA), DJUI_BUTTON_STYLE_NORMAL, djui_panel_camera_create);
+         djui_button_create(body, DLANG(OPTIONS, CONTROLS), DJUI_BUTTON_STYLE_NORMAL, djui_panel_controls_create);
+         djui_button_create(body, DLANG(OPTIONS, DISPLAY), DJUI_BUTTON_STYLE_NORMAL, djui_panel_display_create);
++#ifdef SM64_VISION_3D
++        // Next to Display, because that is what it is: how the game is presented.
++        djui_button_create(body, "VR", DJUI_BUTTON_STYLE_NORMAL, djui_panel_vr_create);
++#endif
+         djui_button_create(body, DLANG(OPTIONS, SOUND), DJUI_BUTTON_STYLE_NORMAL, djui_panel_sound_create);
+         djui_button_create(body, DLANG(OPTIONS, MISC), DJUI_BUTTON_STYLE_NORMAL, djui_panel_misc_create);
+         djui_button_create(body, DLANG(MENU, BACK), DJUI_BUTTON_STYLE_BACK, djui_panel_options_back);
 --- a/src/game/skybox.c
 +++ b/src/game/skybox.c
 @@ -13,6 +13,13 @@

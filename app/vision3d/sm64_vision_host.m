@@ -104,6 +104,7 @@ void sm64_3d_apply_settings(void) {
     sm64_vr_spike_set_render_scale(sm64_3d_setting_f("vrRender", SM64_DEF_VRRENDER));
     sm64_vr_spike_set_world_lock((int)(sm64_3d_setting_f("vrLock", SM64_DEF_VRWORLDLOCK) > 0.5f));
     sm64_vr_spike_set_dim(sm64_3d_setting_f("vrDim", SM64_DEF_VRDIM));
+    gfx_metal_set_msaa((int)sm64_3d_setting_f("vrMsaa", SM64_DEF_VRMSAA));
 }
 
 // ---------------------------------------------------------------------------
@@ -502,6 +503,11 @@ void sm64_vr_spike_enter(int variant) {
                 }
             }
         }
+        // Push the stored settings BEFORE the first VR frame, exactly as the 3D
+        // path does. Without this, entering VR used whatever the C statics
+        // happened to hold and a tuned value only took effect once a slider was
+        // touched — which also meant MSAA was never applied at all.
+        sm64_3d_apply_settings();
         sm64_vr_spike_variant = variant;
         sm64_3d_on = 1;
         sm64_metal_set_3d_mode(1);

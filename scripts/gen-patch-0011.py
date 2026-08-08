@@ -195,6 +195,9 @@ NEW_FILES = [
     # R0 SPIKE (throwaway — VR-CHARTER §5 R0.1). Remove these two with the spike.
     "sm64_vr_spike.h",
     "sm64_vr_spike.m",
+    # The in-game VR options panel (charter R2, pulled forward 2026-08-07).
+    "djui_panel_vr.h",
+    "djui_panel_vr.c",
 ]
 for name in NEW_FILES:
     src = APP / name
@@ -562,6 +565,34 @@ t_gfx = replace_once(t_gfx, OLD_DIMS, NEW_DIMS, "gfx-start-frame-panel-aspect",
                      "sm64_3d_get_render_target_size(&sm64_vw, &sm64_vh)")
 
 diffs.append(diff_edit(orig_gfx, t_gfx, REL_GFX))
+
+# ---------------------------------------------------------------------------
+# 2e. djui_panel_options.c — one button for the in-game VR panel.
+#
+# Pristine territory: no other overlay hunk touches this file. The panel itself
+# is repo-owned (packaged above) and self-gates on SM64_VISION_3D, so iOS and
+# desktop compile this file to the same bytes as before.
+REL_OPT = "src/pc/djui/djui_panel_options.c"
+orig_opt = (VENDOR / REL_OPT).read_text()
+
+OLD_OPT_INC = '#include "djui_panel_dynos.h"'
+NEW_OPT_INC = ('#include "djui_panel_dynos.h"\n'
+               '// visionOS VR options (overlay 0011). The header self-gates, so this include\n'
+               '// costs nothing on any other platform.\n'
+               '#include "pc/vision3d/djui_panel_vr.h"')
+t_opt = replace_once(orig_opt, OLD_OPT_INC, NEW_OPT_INC, "options-vr-include",
+                     "pc/vision3d/djui_panel_vr.h")
+
+OLD_OPT_BTN = '        djui_button_create(body, DLANG(OPTIONS, DISPLAY), DJUI_BUTTON_STYLE_NORMAL, djui_panel_display_create);'
+NEW_OPT_BTN = ('        djui_button_create(body, DLANG(OPTIONS, DISPLAY), DJUI_BUTTON_STYLE_NORMAL, djui_panel_display_create);\n'
+               '#ifdef SM64_VISION_3D\n'
+               '        // Next to Display, because that is what it is: how the game is presented.\n'
+               '        djui_button_create(body, "VR", DJUI_BUTTON_STYLE_NORMAL, djui_panel_vr_create);\n'
+               '#endif')
+t_opt = replace_once(t_opt, OLD_OPT_BTN, NEW_OPT_BTN, "options-vr-button",
+                     'djui_panel_vr_create')
+
+diffs.append(diff_edit(orig_opt, t_opt, REL_OPT))
 
 # ---------------------------------------------------------------------------
 # 2b. skybox.c — the background-layer markers (P1-a). skybox.c is touched by NO

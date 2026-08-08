@@ -115,6 +115,17 @@ cmake --no-warn-unused-cli -S "$VENDOR" -B "$BUILD" -GXcode \
     "-DCMAKE_PROJECT_sm64coopdx_INCLUDE=$ROOT/app/vision3d/vision3d.cmake" \
     "-DSM64_SDL2_VISIONOS_PATCH=$ROOT/overlay/assets/sdl2-visionos-compat.patch"
 
+# publish-vision-ota.sh's `xcodebuild archive` leaves Release-xros/sm64coopdx.app
+# behind as a SYMLINK into the archive's InstallationBuildProductsLocation, which
+# Xcode then deletes with the archive intermediates. The next ordinary build dies
+# on `mkdir -p` of that dangling link with the thoroughly unhelpful "unable to
+# create directory". So every build after a publish failed until the link was
+# cleared by hand. Clear it here, and ONLY when it is genuinely dangling.
+if [[ -L "$BUILD/Release-xros/sm64coopdx.app" && ! -e "$BUILD/Release-xros/sm64coopdx.app" ]]; then
+    echo "clearing dangling archive symlink at Release-xros/sm64coopdx.app"
+    rm "$BUILD/Release-xros/sm64coopdx.app"
+fi
+
 cmake --build "$BUILD" --config Release --target sm64coopdx --parallel 12 \
     -- -allowProvisioningUpdates
 

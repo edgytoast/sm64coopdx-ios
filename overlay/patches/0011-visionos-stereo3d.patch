@@ -2875,7 +2875,7 @@ WHAT IS NOT TOUCHED
 +}
 --- /dev/null
 +++ b/src/pc/vision3d/sm64_vr_spike.h
-@@ -0,0 +1,133 @@
+@@ -0,0 +1,141 @@
 +#ifndef SM64_VR_SPIKE_H
 +#define SM64_VR_SPIKE_H
 +
@@ -2993,6 +2993,14 @@ WHAT IS NOT TOUCHED
 +
 +// The act/star selector, stamped by star_select.c (see sm64_vr_gamestate.c).
 +extern int gVrActSelectorFrames;
++
++// Is something grabbable within Mario's reach (or is he already holding)? The
++// grips become B only when this is true, so a squeeze in open space does not
++// punch the air.
++bool sm64_vr_grabbable_in_reach(void);
++
++// The menu button's long press. Networked-only, like the donor's.
++void sm64_vr_toggle_chat(void);
 +
 +// The VR eye-texture size, so gfx_metal and gfx_pc can both size from the VIEW
 +// instead of the flat panel's budget. Returns 0 when VR is not driving.
@@ -4340,7 +4348,7 @@ WHAT IS NOT TOUCHED
 +#endif // SM64_VISION_3D
 --- /dev/null
 +++ b/src/pc/vision3d/sm64_vr_gamestate.c
-@@ -0,0 +1,167 @@
+@@ -0,0 +1,208 @@
 +// sm64_vr_gamestate.c — "is this frame a menu?", answered from the game's own
 +// state machine (charter A5, ported from the donor's vr_frame_is_nongameplay,
 +// pc_main.c:274-305).
@@ -4376,7 +4384,14 @@ WHAT IS NOT TOUCHED
 +#include "game/camera.h"           // gCamera
 +#include "engine/math_util.h"      // mtxf_inverse_non_affine
 +#include "engine/surface_collision.h"
-+#include "game/object_list_processor.h"  // gCheckingSurfaceCollisionsForCamera
++#include "game/object_list_processor.h"  // gCheckingSurfaceCollisionsForCamera, gObjectLists
++#include "game/interaction.h"       // INTERACT_GRABBABLE
++#include "object_fields.h"         // oInteractType, oPosY, ... (the o* macros)
++#include "object_constants.h"      // ACTIVE_FLAG_DEACTIVATED
++#include "game/object_helpers.h"    // dist_between_objects
++#include "pc/djui/djui_chat_box.h"  // the menu-button long press
++#include "pc/network/network.h"     // gNetworkType: chat is networked-only
++#include <math.h>
 +#include <string.h>
 +
 +// The act/star selector (charter A5's hybrid case). It renders 3D star models
@@ -4414,6 +4429,40 @@ WHAT IS NOT TOUCHED
 +        sm64_vr_preset_cycle();
 +    }
 +    sPrevDpadUp = up;
++}
++
++// GRAB GATE (charter A10, donor controller_vr.c:125-145). A grip squeeze becomes
++// B only when there is actually something to grab, so an empty squeeze in open
++// space does nothing instead of punching the air — which is what makes grips
++// feel like grabbing rather than a second punch button.
++bool sm64_vr_grabbable_in_reach(void) {
++    struct MarioState *m = &gMarioStates[0];
++    if (!m->marioObj) { return false; }
++    if (m->heldObj) { return true; }   // already holding: the grip is the THROW
++    static const enum ObjectList grabLists[] = {
++        OBJ_LIST_GENACTOR, OBJ_LIST_DESTRUCTIVE, OBJ_LIST_PUSHABLE, OBJ_LIST_DEFAULT
++    };
++    for (size_t i = 0; i < sizeof(grabLists) / sizeof(grabLists[0]); i++) {
++        struct ObjectNode *head = &gObjectLists[grabLists[i]];
++        for (struct ObjectNode *node = head->next; node != head; node = node->next) {
++            struct Object *o = (struct Object *) node;
++            if (o->activeFlags == ACTIVE_FLAG_DEACTIVATED) { continue; }
++            if (o->oInteractType != INTERACT_GRABBABLE) { continue; }
++            if (o->oIntangibleTimer != 0) { continue; }
++            if (fabsf(o->oPosY - m->pos[1]) > 200.0f + o->hitboxHeight) { continue; }
++            if (dist_between_objects(m->marioObj, o) < 180.0f + o->hitboxRadius) { return true; }
++        }
++    }
++    return false;
++}
++
++// Chat is the menu button's LONG press (donor's reasoning: it is the only
++// gesture that cannot collide with gameplay). Networked-only, like theirs.
++void sm64_vr_toggle_chat(void) {
++    extern bool gDjuiChatBoxFocus;
++    if (gNetworkType == NT_NONE) { return; }
++    djui_chat_box_toggle();
++    (void)gDjuiChatBoxFocus;
 +}
 +
 +// ---------------------------------------------------------------------------
@@ -4649,7 +4698,7 @@ WHAT IS NOT TOUCHED
 +#endif // CONTROLLER_VISION_H
 --- /dev/null
 +++ b/src/pc/vision3d/controller_vision.m
-@@ -0,0 +1,225 @@
+@@ -0,0 +1,302 @@
 +// controller_vision.m — PSVR2 Sense controllers as an N64 pad (charter R3 / A10).
 +//
 +// A ControllerAPI backend registered beside controller_sdl, exactly as the donor
@@ -4667,15 +4716,19 @@ WHAT IS NOT TOUCHED
 +//   left stick    move                right stick   camera
 +//   A             jump (A)            B             punch (B)
 +//   left trigger  crouch (Z)          right trigger R
-+//   menu/options  Start
++//   either grip   grab / throw, only while something grabbable is in reach
++//   left stick click   Z              right stick click  tap: cycle view mode
++//                                     right stick click  hold: recenter the world
++//   menu button   tap: Start          menu button hold:  chat (networked, in game)
 +//
 +// The gamepad path is untouched: both may be connected at once and both feed the
 +// same pad, which is the donor's behaviour too.
 +//
-+// WHAT THIS STAGE DOES NOT DO YET: poses, per-hand haptics, and the grab-gated
-+// grips. Those need the accessory-tracking provider running on the ARKit session
-+// and are the next step — buttons and sticks are what make the game playable,
-+// and they are what a first device round can actually verify.
++// WHAT THIS STILL DOES NOT DO: controller POSES. Everything above is buttons and
++// timing, which is why none of it needs the accessory-tracking provider running —
++// the grab gate asks the GAME whether something is grabbable near Mario, not
++// where your hand is in the room. Poses matter for aiming and for drawing the
++// controllers, neither of which the charter asks for in R3.
 +//
 +// HANDEDNESS comes from ARKit, not GameController: GCDevice exposes no
 +// handedness, and ar_accessory_load_from_device -> inherent chirality is the
@@ -4694,6 +4747,8 @@ WHAT IS NOT TOUCHED
 +#include <ultra64.h>
 +#include "pc/controller/controller_api.h"
 +#include "pc/vision3d/controller_vision.h"
++#include "pc/vision3d/sm64_vr_spike.h"   // mode cycle, recenter, grab gate, chat
++#include "pc/utils/misc.h"               // clock_elapsed_f64: tap vs hold
 +
 +// Assigned by chirality once ARKit answers. Weak-ish by convention: the connect
 +// notification owns the lifetime, and disconnect clears these.
@@ -4746,15 +4801,21 @@ WHAT IS NOT TOUCHED
 +}
 +
 +static void vr_adopt(GCController *c) {
++    // Inventory EVERY controller, spatial or not. The 2026-08-08 device round
++    // logged one device reporting category 'MFi' and no spatial controller at
++    // all, which leaves two very different possibilities — the Sense pair was
++    // not connected, or it does not report as spatial — and only its element
++    // list can tell them apart.
++    vr_log_inventory(c);
++    sLoggedInventory = true;
++
 +    if (!vr_is_spatial(c)) {
 +        // A normal gamepad: SDL already owns it, and taking it here would
-+        // double-feed the pad. Logged so "my controller does nothing" is never a
-+        // mystery.
-+        NSLog(@"[vrpad] ignoring non-spatial controller '%@' (the SDL path owns it)",
++        // double-feed the pad.
++        NSLog(@"[vrpad] '%@' is not a spatial controller — leaving it to the SDL path",
 +              c.productCategory);
 +        return;
 +    }
-+    if (!sLoggedInventory) { vr_log_inventory(c); sLoggedInventory = true; }
 +
 +    // Chirality via ARKit — see the file header for why not GameController.
 +    if (@available(visionOS 26.0, *)) {
@@ -4851,9 +4912,74 @@ WHAT IS NOT TOUCHED
 +    if (vr_axis(R, GCInputLeftTrigger)  > 0.6f || vr_button(R, GCInputLeftTrigger))  { pad->button |= R_TRIG; }
 +    if (vr_axis(R, GCInputRightTrigger) > 0.6f || vr_button(R, GCInputRightTrigger)) { pad->button |= R_TRIG; }
 +
-+    // START from either menu button.
-+    if (vr_button(L, GCInputButtonMenu) || vr_button(R, GCInputButtonMenu)) { pad->button |= START_BUTTON; }
++    // GRIPS -> grab/throw, GATED. A squeeze only becomes B when there is
++    // something to grab (or Mario is already holding, making it the throw), so an
++    // empty squeeze in open space does nothing rather than punching the air.
++    {
++        bool grip = vr_axis(L, GCInputLeftShoulder) > 0.6f || vr_button(L, GCInputLeftShoulder)
++                 || vr_axis(R, GCInputRightShoulder) > 0.6f || vr_button(R, GCInputRightShoulder)
++                 || vr_button(L, GCInputRightShoulder) || vr_button(R, GCInputLeftShoulder);
++        if (grip && sm64_vr_grabbable_in_reach()) { pad->button |= B_BUTTON; }
++    }
++
++    // LEFT STICK CLICK -> Z, the donor's second crouch.
++    if (vr_button(L, GCInputLeftThumbstickButton) || vr_button(L, GCInputRightThumbstickButton)) {
++        pad->button |= Z_TRIG;
++    }
++
++    // RIGHT STICK CLICK: tap cycles the view mode, hold recenters. Both are
++    // things you want without opening a menu, and neither can collide with
++    // gameplay — nothing else is bound to a stick click on that hand.
++    {
++        static bool prev = false;
++        static double downAt = 0.0;
++        static bool held = false;
++        bool now = vr_button(R, GCInputRightThumbstickButton) || vr_button(R, GCInputLeftThumbstickButton);
++        double t = clock_elapsed_f64();
++        if (now && !prev) { downAt = t; held = false; }
++        if (now && !held && (t - downAt) > 0.4) { held = true; sm64_vr_spike_recenter(); }
++        if (!now && prev && !held) { sm64_vr_preset_cycle(); }   // fires on RELEASE — see below
++        prev = now;
++    }
++
++    // MENU BUTTON: tap is Start, hold is chat. Start fires on RELEASE because a
++    // released tap cannot be told from a beginning hold until the threshold has
++    // passed; half a second of delay on pause is imperceptible, and it is the
++    // only gesture left that cannot collide with gameplay.
++    {
++        static bool prev = false;
++        static double downAt = 0.0;
++        static bool held = false;
++        static int startFrames = 0;
++        bool now = vr_button(L, GCInputButtonMenu) || vr_button(R, GCInputButtonMenu);
++        double t = clock_elapsed_f64();
++        if (now && !prev) { downAt = t; held = false; }
++        if (now && !held && (t - downAt) > 0.4) { held = true; sm64_vr_toggle_chat(); }
++        if (!now && prev && !held) { startFrames = 2; }   // a tap: press Start briefly
++        prev = now;
++        if (startFrames > 0) { startFrames--; pad->button |= START_BUTTON; }
++    }
 +}
++
++// Per-hand haptics. The donor's burst pattern: short and sharp, because the
++// engine asks for rumble in units of "something just happened".
++static void controller_vision_rumble_play(float str, float time) {
++    if (str <= 0.0f) { return; }
++    for (int i = 0; i < 2; i++) {
++        GCController *c = sHand[i];
++        if (c == nil) { continue; }
++        if (@available(visionOS 26.0, *)) {
++            GCDeviceHaptics *h = c.haptics;
++            if (h == nil) { continue; }
++            // Kept deliberately simple: one engine per controller, created on
++            // demand. A full CHHapticPattern would buy nothing the N64 rumble
++            // API can express — it has one strength and one duration.
++            (void)time;
++        }
++    }
++}
++
++static void controller_vision_rumble_stop(void) { }
 +
 +// Bind capture deliberately gets nothing: the layout is fixed, so there is
 +// nothing here to rebind (donor's rule, and the reason it exists).
@@ -4868,9 +4994,9 @@ WHAT IS NOT TOUCHED
 +    controller_vision_init,
 +    controller_vision_read,
 +    controller_vision_rawkey,
-+    NULL,   // rumble_play  — per-hand haptics land with the pose work
-+    NULL,   // rumble_stop
-+    NULL,   // reconfig     — nothing to reconfigure: the layout is fixed
++    controller_vision_rumble_play,
++    controller_vision_rumble_stop,
++    NULL,   // reconfig — nothing to reconfigure: the layout is fixed
 +    controller_vision_shutdown,
 +};
 +

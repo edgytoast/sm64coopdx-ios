@@ -116,6 +116,14 @@ void  sm64_vr_anticlip_resolve(void);
 // The act/star selector, stamped by star_select.c (see sm64_vr_gamestate.c).
 extern int gVrActSelectorFrames;
 
+// Is something grabbable within Mario's reach (or is he already holding)? The
+// grips become B only when this is true, so a squeeze in open space does not
+// punch the air.
+bool sm64_vr_grabbable_in_reach(void);
+
+// The menu button's long press. Networked-only, like the donor's.
+void sm64_vr_toggle_chat(void);
+
 // The VR eye-texture size, so gfx_metal and gfx_pc can both size from the VIEW
 // instead of the flat panel's budget. Returns 0 when VR is not driving.
 int sm64_vr_spike_render_size(int *w, int *h);

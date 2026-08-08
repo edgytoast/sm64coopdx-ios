@@ -33,7 +33,14 @@
 #include "game/camera.h"           // gCamera
 #include "engine/math_util.h"      // mtxf_inverse_non_affine
 #include "engine/surface_collision.h"
-#include "game/object_list_processor.h"  // gCheckingSurfaceCollisionsForCamera
+#include "game/object_list_processor.h"  // gCheckingSurfaceCollisionsForCamera, gObjectLists
+#include "game/interaction.h"       // INTERACT_GRABBABLE
+#include "object_fields.h"         // oInteractType, oPosY, ... (the o* macros)
+#include "object_constants.h"      // ACTIVE_FLAG_DEACTIVATED
+#include "game/object_helpers.h"    // dist_between_objects
+#include "pc/djui/djui_chat_box.h"  // the menu-button long press
+#include "pc/network/network.h"     // gNetworkType: chat is networked-only
+#include <math.h>
 #include <string.h>
 
 // The act/star selector (charter A5's hybrid case). It renders 3D star models
@@ -71,6 +78,40 @@ void sm64_vr_poll_hotkeys(void) {
         sm64_vr_preset_cycle();
     }
     sPrevDpadUp = up;
+}
+
+// GRAB GATE (charter A10, donor controller_vr.c:125-145). A grip squeeze becomes
+// B only when there is actually something to grab, so an empty squeeze in open
+// space does nothing instead of punching the air — which is what makes grips
+// feel like grabbing rather than a second punch button.
+bool sm64_vr_grabbable_in_reach(void) {
+    struct MarioState *m = &gMarioStates[0];
+    if (!m->marioObj) { return false; }
+    if (m->heldObj) { return true; }   // already holding: the grip is the THROW
+    static const enum ObjectList grabLists[] = {
+        OBJ_LIST_GENACTOR, OBJ_LIST_DESTRUCTIVE, OBJ_LIST_PUSHABLE, OBJ_LIST_DEFAULT
+    };
+    for (size_t i = 0; i < sizeof(grabLists) / sizeof(grabLists[0]); i++) {
+        struct ObjectNode *head = &gObjectLists[grabLists[i]];
+        for (struct ObjectNode *node = head->next; node != head; node = node->next) {
+            struct Object *o = (struct Object *) node;
+            if (o->activeFlags == ACTIVE_FLAG_DEACTIVATED) { continue; }
+            if (o->oInteractType != INTERACT_GRABBABLE) { continue; }
+            if (o->oIntangibleTimer != 0) { continue; }
+            if (fabsf(o->oPosY - m->pos[1]) > 200.0f + o->hitboxHeight) { continue; }
+            if (dist_between_objects(m->marioObj, o) < 180.0f + o->hitboxRadius) { return true; }
+        }
+    }
+    return false;
+}
+
+// Chat is the menu button's LONG press (donor's reasoning: it is the only
+// gesture that cannot collide with gameplay). Networked-only, like theirs.
+void sm64_vr_toggle_chat(void) {
+    extern bool gDjuiChatBoxFocus;
+    if (gNetworkType == NT_NONE) { return; }
+    djui_chat_box_toggle();
+    (void)gDjuiChatBoxFocus;
 }
 
 // ---------------------------------------------------------------------------

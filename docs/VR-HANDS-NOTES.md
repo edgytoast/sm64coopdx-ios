@@ -78,6 +78,35 @@ be had and the whole feature stops there.
    grab-with-hands (proximity to the HAND rather than to Mario) and
    punch-with-hands (a thrust gesture).
 
+## What was actually built (2026-08-08, OTA 1.1.2.18)
+
+Austin asked for all of it in one build rather than gating on step 1, so steps
+1-3 shipped together, untested in a headset.
+
+- **Step 1's question is now ASKED, not answered.** The reason it had never been
+  asked is worth recording: `ar_accessory_load_from_device` sat behind
+  `controller_vision.m`'s `vr_is_spatial()` gate, which is the right gate for
+  deciding who drives the N64 pad and the wrong one for poses — that call takes a
+  `GCDevice`, not a spatial controller. It now runs for every controller and logs
+  `[vrhands] accessory LOADED` or `[vrhands] accessory load FAILED` either way.
+  **Read those lines before building anything further.**
+- **Steps 2 and 3 are merged.** No marker quad: the hands draw as flat WHITE
+  primitive-colour geometry, which serves the marker's purpose (a wrong transform
+  is unmistakable) while already being the right material — Mario's gloves are
+  white, and a flat colour cannot be silently wrong the way normals-read-as-
+  colours can.
+- `sm64_vr_hands.m` owns accessory loading, a dedicated ARKit session (separate
+  from the VR loop's world-tracking one, because accessories load asynchronously
+  and the loop's session is created once), the per-frame anchor poll, and the
+  `inverse(A) * accessoryPose` chain into game-camera space.
+- Settings `vrHands` / `vrHandSize` in both menus.
+- **Step 4 (grab-with-hands, punch-with-hands) is NOT built** — it is pointless
+  until poses are confirmed.
+
+Known rough edge if poses do work: the hands are drawn at the very end of the
+eye's display list, so they draw over the HUD as well as the world. That is
+arguable rather than wrong, and it is cheap to revisit.
+
 ## Scope decided with Austin
 
 Hands only, no arms. Mario's arms are animation-driven, not IK-driven, and his

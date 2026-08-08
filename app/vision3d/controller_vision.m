@@ -15,13 +15,27 @@
 //   left stick    move                right stick   camera
 //   A             jump (A)            B             punch (B)
 //   left trigger  crouch (Z)          right trigger R
-//   either grip   grab / throw, only while something grabbable is in reach
+//   either grip   grab / throw — FIRST-PERSON ONLY (see below)
 //   left stick click   Z              right stick click  tap: cycle view mode
 //                                     right stick click  hold: recenter the world
 //   menu button   tap: Start          menu button hold:  chat (networked, in game)
 //
 // The gamepad path is untouched: both may be connected at once and both feed the
 // same pad, which is the donor's behaviour too.
+//
+// SCOPE, decided on device (Austin, 2026-08-08): outside first-person the Sense
+// pair should behave exactly like a regular controller, and on this system it
+// already does — visionOS presents the pair as ONE standard MFi gamepad, which
+// the SDL path drives with the normal binds. That is the correct behaviour and
+// this backend deliberately stays out of its way (it claims spatial-category
+// devices only, and a Sense pair is not one). Hand-shaped gestures — grabbing,
+// throwing, per-hand haptics — belong to FIRST-PERSON mode, where your hands are
+// actually in the world; that is R4's problem, not a third-person one.
+//
+// The backend therefore remains DORMANT on today's hardware, doing nothing but
+// inventorying what connects. It is kept because R4 needs somewhere to put the
+// per-hand work, and because a future device that does enumerate as spatial
+// would otherwise fall through to binds — the failure this exists to prevent.
 //
 // WHAT THIS STILL DOES NOT DO: controller POSES. Everything above is buttons and
 // timing, which is why none of it needs the accessory-tracking provider running —
@@ -211,10 +225,10 @@ static void controller_vision_read(OSContPad *pad) {
     if (vr_axis(R, GCInputLeftTrigger)  > 0.6f || vr_button(R, GCInputLeftTrigger))  { pad->button |= R_TRIG; }
     if (vr_axis(R, GCInputRightTrigger) > 0.6f || vr_button(R, GCInputRightTrigger)) { pad->button |= R_TRIG; }
 
-    // GRIPS -> grab/throw, GATED. A squeeze only becomes B when there is
-    // something to grab (or Mario is already holding, making it the throw), so an
-    // empty squeeze in open space does nothing rather than punching the air.
-    {
+    // GRIPS -> grab/throw, GATED, and FIRST-PERSON ONLY. In third-person the
+    // grips are just pad buttons and should stay that way (Austin: one of them
+    // toggles camera zoom for him, "this is all correct").
+    if (sm64_vr_first_person_active()) {
         bool grip = vr_axis(L, GCInputLeftShoulder) > 0.6f || vr_button(L, GCInputLeftShoulder)
                  || vr_axis(R, GCInputRightShoulder) > 0.6f || vr_button(R, GCInputRightShoulder)
                  || vr_button(L, GCInputRightShoulder) || vr_button(R, GCInputLeftShoulder);

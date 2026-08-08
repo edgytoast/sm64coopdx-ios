@@ -96,6 +96,10 @@ void        sm64_vr_preset_apply(int idx);
 void        sm64_vr_preset_cycle(void);
 void        sm64_vr_preset_reset_current(void);
 
+// True while the active mode is first-person (charter R4). Hand-shaped gestures
+// are gated on this: outside first-person the controllers are just a pad.
+bool        sm64_vr_first_person_active(void);
+
 // D-pad up cycles the view mode without opening a menu (donor pc_main.c:497-503).
 // Engine thread only — it reads the game's controller state.
 void sm64_vr_poll_hotkeys(void);
@@ -113,8 +117,10 @@ void  sm64_vr_anticlip_set_offset(const float m[3]);
 float sm64_vr_anticlip_world_scale(void);
 void  sm64_vr_anticlip_resolve(void);
 
-// The act/star selector, stamped by star_select.c (see sm64_vr_gamestate.c).
-extern int gVrActSelectorFrames;
+// The act/star selector: a DEADLINE in seconds, stamped by star_select.c. Not a
+// frame count — the stamp is refilled per sim tick and read per rendered frame,
+// and counting made the two rates race (see sm64_vr_gamestate.c).
+extern double gVrActSelectorUntil;
 
 // Is something grabbable within Mario's reach (or is he already holding)? The
 // grips become B only when this is true, so a squeeze in open space does not

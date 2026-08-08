@@ -622,14 +622,19 @@ t_star = replace_once(orig_star, OLD_STAR_INC, NEW_STAR_INC, "star-select-includ
 OLD_STAR_UPD = "s32 lvl_update_obj_and_load_act_button_actions(UNUSED s32 arg, UNUSED s32 unused) {"
 NEW_STAR_UPD = ('s32 lvl_update_obj_and_load_act_button_actions(UNUSED s32 arg, UNUSED s32 unused) {\n'
                 '#ifdef SM64_VISION_3D\n'
-                '    // visionOS VR: present this screen flat, like every other menu.\n'
-                '    extern int gVrActSelectorFrames;\n'
-                '    gVrActSelectorFrames = 4;\n'
+                '    // visionOS VR: present this screen flat, like every other menu. A\n'
+                '    // DEADLINE, not a frame count: this runs at the sim rate and the VR\n'
+                '    // side reads it at the render rate, and counting let the two race.\n'
+                '    {\n'
+                '        extern double gVrActSelectorUntil;\n'
+                '        extern f64 clock_elapsed_f64(void);\n'
+                '        gVrActSelectorUntil = clock_elapsed_f64() + 0.25;\n'
+                '    }\n'
                 '#endif')
 t_star = replace_once(orig_star, OLD_STAR_UPD, NEW_STAR_UPD, "star-select-stamp",
                       "gVrActSelectorFrames") if False else replace_once(
                       t_star, OLD_STAR_UPD, NEW_STAR_UPD, "star-select-stamp",
-                      "gVrActSelectorFrames = 4")
+                      "gVrActSelectorUntil = clock_elapsed_f64()")
 
 diffs.append(diff_edit(orig_star, t_star, REL_STAR))
 

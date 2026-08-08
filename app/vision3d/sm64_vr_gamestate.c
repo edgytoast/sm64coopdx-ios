@@ -41,6 +41,7 @@
 #include "pc/djui/djui_chat_box.h"  // the menu-button long press
 #include "pc/network/network.h"     // gNetworkType: chat is networked-only
 #include <math.h>
+#include "pc/utils/misc.h"       // clock_elapsed_f64
 #include <string.h>
 
 // The act/star selector (charter A5's hybrid case). It renders 3D star models
@@ -48,10 +49,18 @@
 // added a game-side flag for exactly this and so do we. star_select.c stamps a
 // few frames of grace each time its update runs, which also covers the moment
 // either side of the load where it is still on screen.
-int gVrActSelectorFrames = 0;
+//
+// TIME-stamped, not frame-counted, and that distinction is the whole bug Austin
+// hit (2026-08-08: "it does show the 2D screen, but the 3D screen is also
+// flickering constantly - like two duplicates fighting over space"). The stamp
+// is refilled once per SIM tick (30 Hz) but was being consumed once per RENDERED
+// frame (90-120 Hz): four of each, so the slightest jitter emptied it, panel mode
+// dropped for a frame, the stereo world drew, and the eye textures reallocated
+// between the two aspects. A deadline in seconds cannot be raced by a rate ratio.
+double gVrActSelectorUntil = 0.0;
 
 bool sm64_vr_frame_is_nongameplay(void) {
-    if (gVrActSelectorFrames > 0) { gVrActSelectorFrames--; return true; }
+    if (clock_elapsed_f64() < gVrActSelectorUntil) { return true; }
     // A door / level transition is a 2D fullscreen effect. In the stereo world
     // it would only cover the middle of your view; on the panel it fills the
     // screen the way it is meant to.

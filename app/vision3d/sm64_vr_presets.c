@@ -99,6 +99,13 @@ void sm64_vr_preset_apply(int idx) {
            sm64_3d_setting_f("vrHeight", 0.0f));
 }
 
+// Is the ACTIVE mode first-person? No such mode exists yet (charter R4), so this
+// is false today — but the hand-shaped gestures are gated on it rather than on
+// nothing, so adding the mode turns them on instead of needing them found again.
+bool sm64_vr_first_person_active(void) {
+    return false;   // R4: becomes `sm64_vr_preset_get() == PRESET_FIRST_PERSON`
+}
+
 void sm64_vr_preset_cycle(void) {
     sm64_vr_preset_apply((sm64_vr_preset_get() + 1) % SM64_VR_PRESET_COUNT);
 }

@@ -2875,7 +2875,7 @@ WHAT IS NOT TOUCHED
 +}
 --- /dev/null
 +++ b/src/pc/vision3d/sm64_vr_spike.h
-@@ -0,0 +1,141 @@
+@@ -0,0 +1,147 @@
 +#ifndef SM64_VR_SPIKE_H
 +#define SM64_VR_SPIKE_H
 +
@@ -2974,6 +2974,10 @@ WHAT IS NOT TOUCHED
 +void        sm64_vr_preset_cycle(void);
 +void        sm64_vr_preset_reset_current(void);
 +
++// True while the active mode is first-person (charter R4). Hand-shaped gestures
++// are gated on this: outside first-person the controllers are just a pad.
++bool        sm64_vr_first_person_active(void);
++
 +// D-pad up cycles the view mode without opening a menu (donor pc_main.c:497-503).
 +// Engine thread only — it reads the game's controller state.
 +void sm64_vr_poll_hotkeys(void);
@@ -2991,8 +2995,10 @@ WHAT IS NOT TOUCHED
 +float sm64_vr_anticlip_world_scale(void);
 +void  sm64_vr_anticlip_resolve(void);
 +
-+// The act/star selector, stamped by star_select.c (see sm64_vr_gamestate.c).
-+extern int gVrActSelectorFrames;
++// The act/star selector: a DEADLINE in seconds, stamped by star_select.c. Not a
++// frame count — the stamp is refilled per sim tick and read per rendered frame,
++// and counting made the two rates race (see sm64_vr_gamestate.c).
++extern double gVrActSelectorUntil;
 +
 +// Is something grabbable within Mario's reach (or is he already holding)? The
 +// grips become B only when this is true, so a squeeze in open space does not
@@ -4348,7 +4354,7 @@ WHAT IS NOT TOUCHED
 +#endif // SM64_VISION_3D
 --- /dev/null
 +++ b/src/pc/vision3d/sm64_vr_gamestate.c
-@@ -0,0 +1,208 @@
+@@ -0,0 +1,217 @@
 +// sm64_vr_gamestate.c — "is this frame a menu?", answered from the game's own
 +// state machine (charter A5, ported from the donor's vr_frame_is_nongameplay,
 +// pc_main.c:274-305).
@@ -4392,6 +4398,7 @@ WHAT IS NOT TOUCHED
 +#include "pc/djui/djui_chat_box.h"  // the menu-button long press
 +#include "pc/network/network.h"     // gNetworkType: chat is networked-only
 +#include <math.h>
++#include "pc/utils/misc.h"       // clock_elapsed_f64
 +#include <string.h>
 +
 +// The act/star selector (charter A5's hybrid case). It renders 3D star models
@@ -4399,10 +4406,18 @@ WHAT IS NOT TOUCHED
 +// added a game-side flag for exactly this and so do we. star_select.c stamps a
 +// few frames of grace each time its update runs, which also covers the moment
 +// either side of the load where it is still on screen.
-+int gVrActSelectorFrames = 0;
++//
++// TIME-stamped, not frame-counted, and that distinction is the whole bug Austin
++// hit (2026-08-08: "it does show the 2D screen, but the 3D screen is also
++// flickering constantly - like two duplicates fighting over space"). The stamp
++// is refilled once per SIM tick (30 Hz) but was being consumed once per RENDERED
++// frame (90-120 Hz): four of each, so the slightest jitter emptied it, panel mode
++// dropped for a frame, the stereo world drew, and the eye textures reallocated
++// between the two aspects. A deadline in seconds cannot be raced by a rate ratio.
++double gVrActSelectorUntil = 0.0;
 +
 +bool sm64_vr_frame_is_nongameplay(void) {
-+    if (gVrActSelectorFrames > 0) { gVrActSelectorFrames--; return true; }
++    if (clock_elapsed_f64() < gVrActSelectorUntil) { return true; }
 +    // A door / level transition is a 2D fullscreen effect. In the stereo world
 +    // it would only cover the middle of your view; on the panel it fills the
 +    // screen the way it is meant to.
@@ -4559,7 +4574,7 @@ WHAT IS NOT TOUCHED
 +#endif // SM64_VISION_3D
 --- /dev/null
 +++ b/src/pc/vision3d/sm64_vr_presets.c
-@@ -0,0 +1,116 @@
+@@ -0,0 +1,123 @@
 +// sm64_vr_presets.c — VR view modes (charter R2, donor vr.c:1493-1556).
 +//
 +// A "mode" is just a remembered set of placement numbers, and the donor's design
@@ -4661,6 +4676,13 @@ WHAT IS NOT TOUCHED
 +           sm64_3d_setting_f("vrHeight", 0.0f));
 +}
 +
++// Is the ACTIVE mode first-person? No such mode exists yet (charter R4), so this
++// is false today — but the hand-shaped gestures are gated on it rather than on
++// nothing, so adding the mode turns them on instead of needing them found again.
++bool sm64_vr_first_person_active(void) {
++    return false;   // R4: becomes `sm64_vr_preset_get() == PRESET_FIRST_PERSON`
++}
++
 +void sm64_vr_preset_cycle(void) {
 +    sm64_vr_preset_apply((sm64_vr_preset_get() + 1) % SM64_VR_PRESET_COUNT);
 +}
@@ -4698,7 +4720,7 @@ WHAT IS NOT TOUCHED
 +#endif // CONTROLLER_VISION_H
 --- /dev/null
 +++ b/src/pc/vision3d/controller_vision.m
-@@ -0,0 +1,302 @@
+@@ -0,0 +1,316 @@
 +// controller_vision.m — PSVR2 Sense controllers as an N64 pad (charter R3 / A10).
 +//
 +// A ControllerAPI backend registered beside controller_sdl, exactly as the donor
@@ -4716,13 +4738,27 @@ WHAT IS NOT TOUCHED
 +//   left stick    move                right stick   camera
 +//   A             jump (A)            B             punch (B)
 +//   left trigger  crouch (Z)          right trigger R
-+//   either grip   grab / throw, only while something grabbable is in reach
++//   either grip   grab / throw — FIRST-PERSON ONLY (see below)
 +//   left stick click   Z              right stick click  tap: cycle view mode
 +//                                     right stick click  hold: recenter the world
 +//   menu button   tap: Start          menu button hold:  chat (networked, in game)
 +//
 +// The gamepad path is untouched: both may be connected at once and both feed the
 +// same pad, which is the donor's behaviour too.
++//
++// SCOPE, decided on device (Austin, 2026-08-08): outside first-person the Sense
++// pair should behave exactly like a regular controller, and on this system it
++// already does — visionOS presents the pair as ONE standard MFi gamepad, which
++// the SDL path drives with the normal binds. That is the correct behaviour and
++// this backend deliberately stays out of its way (it claims spatial-category
++// devices only, and a Sense pair is not one). Hand-shaped gestures — grabbing,
++// throwing, per-hand haptics — belong to FIRST-PERSON mode, where your hands are
++// actually in the world; that is R4's problem, not a third-person one.
++//
++// The backend therefore remains DORMANT on today's hardware, doing nothing but
++// inventorying what connects. It is kept because R4 needs somewhere to put the
++// per-hand work, and because a future device that does enumerate as spatial
++// would otherwise fall through to binds — the failure this exists to prevent.
 +//
 +// WHAT THIS STILL DOES NOT DO: controller POSES. Everything above is buttons and
 +// timing, which is why none of it needs the accessory-tracking provider running —
@@ -4912,10 +4948,10 @@ WHAT IS NOT TOUCHED
 +    if (vr_axis(R, GCInputLeftTrigger)  > 0.6f || vr_button(R, GCInputLeftTrigger))  { pad->button |= R_TRIG; }
 +    if (vr_axis(R, GCInputRightTrigger) > 0.6f || vr_button(R, GCInputRightTrigger)) { pad->button |= R_TRIG; }
 +
-+    // GRIPS -> grab/throw, GATED. A squeeze only becomes B when there is
-+    // something to grab (or Mario is already holding, making it the throw), so an
-+    // empty squeeze in open space does nothing rather than punching the air.
-+    {
++    // GRIPS -> grab/throw, GATED, and FIRST-PERSON ONLY. In third-person the
++    // grips are just pad buttons and should stay that way (Austin: one of them
++    // toggles camera zoom for him, "this is all correct").
++    if (sm64_vr_first_person_active()) {
 +        bool grip = vr_axis(L, GCInputLeftShoulder) > 0.6f || vr_button(L, GCInputLeftShoulder)
 +                 || vr_axis(R, GCInputRightShoulder) > 0.6f || vr_button(R, GCInputRightShoulder)
 +                 || vr_button(L, GCInputRightShoulder) || vr_button(R, GCInputLeftShoulder);
@@ -5356,14 +5392,19 @@ WHAT IS NOT TOUCHED
  #include "prevent_bss_reordering.h"
  #include "pc/network/network.h"
  #include "pc/lua/utils/smlua_misc_utils.h"
-@@ -458,6 +459,11 @@
+@@ -458,6 +459,16 @@
   * Also updates objects and returns act number selected after is chosen.
   */
  s32 lvl_update_obj_and_load_act_button_actions(UNUSED s32 arg, UNUSED s32 unused) {
 +#ifdef SM64_VISION_3D
-+    // visionOS VR: present this screen flat, like every other menu.
-+    extern int gVrActSelectorFrames;
-+    gVrActSelectorFrames = 4;
++    // visionOS VR: present this screen flat, like every other menu. A
++    // DEADLINE, not a frame count: this runs at the sim rate and the VR
++    // side reads it at the render rate, and counting let the two race.
++    {
++        extern double gVrActSelectorUntil;
++        extern f64 clock_elapsed_f64(void);
++        gVrActSelectorUntil = clock_elapsed_f64() + 0.25;
++    }
 +#endif
      if (sActSelectorMenuTimer >= 11) {
          // If any of these buttons are pressed, play sound and go to course act

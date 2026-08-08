@@ -38,4 +38,9 @@ int sm64_vr_hand_matrix(int hand, float out[4][4]);
 int   sm64_vr_hands_get_enabled(void);
 float sm64_vr_hands_get_scale(void);
 
+// One human-readable line of "why are there no hands", for the VR panel. The
+// person who can run the headset is not the person who can read a Mac console,
+// so the answer has to be legible from inside.
+void sm64_vr_hands_status(char *buf, int len);
+
 #endif // SM64_VR_HANDS_H

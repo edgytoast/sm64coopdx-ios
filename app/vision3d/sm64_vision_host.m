@@ -297,6 +297,7 @@ void sm64_3d_frame_poll(void) {
         sm64_vr_poll_hotkeys();     // d-pad up cycles the view mode
         sm64_vr_anticlip_resolve(); // level collision keeps the view out of walls
         sm64_vr_sync_first_person(); // FP mode drives the game's own FP camera
+        sm64_vr_sync_look_mode();    // leaving Free levels the pitch (Turn/Snap yaw only)
         sm64_vr_update_flip_cam();   // somersault the view with Mario, if enabled
     }
 

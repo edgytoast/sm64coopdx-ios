@@ -17,6 +17,7 @@
 #include "pc/djui/djui_panel.h"
 #include "pc/djui/djui_panel_menu.h"
 #include "pc/vision3d/sm64_vr_spike.h"
+#include "pc/vision3d/sm64_vr_hands.h"  // the hands status line
 
 // Widget mirrors, in menu units.
 static unsigned int sUiScale;    // game units per metre (a bigger world number = a smaller world)
@@ -101,6 +102,11 @@ static void vr_panel_push(UNUSED struct DjuiBase *caller) {
     sm64_3d_apply_settings();
 }
 
+static char sHandsStatus[64];
+
+// The hands status row is a readout, not a control.
+static void vr_panel_noop(UNUSED struct DjuiBase *caller) { }
+
 static void vr_panel_recenter(UNUSED struct DjuiBase *caller) {
     sm64_vr_spike_recenter();
 }
@@ -171,6 +177,11 @@ void djui_panel_vr_create(struct DjuiBase *caller) {
         // question on this hardware rather than a given.
         djui_checkbox_create(body, "Show Mario Hands", &sUiHands, vr_panel_push);
         djui_slider_create(body, "Hand Size", &sUiHandSize, 30, 300, vr_panel_push);
+        // Why there are no hands, readable from inside the headset. A button
+        // purely because DJUI has no static-text row here; it does nothing.
+        // Snapshot taken at panel creation, which is when you come looking.
+        sm64_vr_hands_status(sHandsStatus, (int) sizeof(sHandsStatus));
+        djui_button_create(body, sHandsStatus, DJUI_BUTTON_STYLE_NORMAL, vr_panel_noop);
 
         // Comfort and image.
         djui_slider_create(body, "Stereo Depth", &sUiStereo, 0, 100, vr_panel_push);

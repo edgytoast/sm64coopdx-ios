@@ -105,32 +105,90 @@ void sm64_vr_sync_first_person(void) {
 // frames while the axis is read from Mario's CURRENT action and switches in one,
 // so split calls hand a decaying roll to the pitch axis mid-decay and the view
 // twists onto an axis it was never leaning on.
+// ONE turn, timed, and it stops. The first cut of this was wrong in two ways
+// that compounded into Austin's device report ("it just flickers and does a
+// first person somersault view like MANY times, and isn't smooth at all",
+// 2026-08-08):
+//
+//  1. It advanced a FIXED step per call and this function is called once per
+//     RENDERED frame, not once per sim tick. At 90 Hz against a step sized for
+//     ~18 ticks, a single backflip spun the view several full turns — the "MANY
+//     times". Nothing clamped it either, so a long action just kept going.
+//  2. A fixed step per frame is by definition frame-rate-dependent, so the same
+//     move span a different arc depending on load — the "isn't smooth".
+//
+// Both die the same way: integrate against the CLOCK, not against the call
+// count, and stop dead at one full revolution. A full turn is the identity
+// rotation, so completing it means snapping to zero rather than easing back
+// down through the arc we just came up (which would read as an unwind).
+#define VR_FLIP_SECONDS 0.60f   // one somersault, about the length of the move
+#define VR_FLIP_TWO_PI  6.28318531f
+
 void sm64_vr_update_flip_cam(void) {
-    static float angle = 0.0f;
-    static bool  side = false;
+    static float  angle = 0.0f;
+    static bool   side = false;
+    static bool   wasFlipping = false;
+    static double lastTime = -1.0;
+
+    double now = clock_elapsed_f64();
+    float dt = (lastTime < 0.0) ? 0.0f : (float) (now - lastTime);
+    lastTime = now;
+    // A long stall (loading, a menu) must not teleport the view a third of a turn.
+    if (dt > 0.1f) { dt = 0.1f; }
 
     struct MarioState *m = &gMarioStates[0];
     bool on = sm64_vr_first_person_active()
            && sm64_3d_setting_f("vrFlipCam", SM64_DEF_VRFLIPCAM) > 0.5f;
     if (!on || m == NULL) {
-        if (angle != 0.0f) { angle = 0.0f; sm64_vr_set_flip(0.0f, false); }
+        if (angle != 0.0f || wasFlipping) {
+            angle = 0.0f; wasFlipping = false; sm64_vr_set_flip(0.0f, false);
+        }
         return;
     }
 
     u32 a = m->action;
     bool flipping = (a == ACT_TRIPLE_JUMP) || (a == ACT_BACKFLIP) || (a == ACT_SIDE_FLIP);
-    if (flipping) {
-        // One full turn over roughly the length of the move. Read the axis in the
-        // SAME frame as the angle, and hand both over together (below).
+
+    if (flipping && !wasFlipping) {
+        // A fresh flip starts from level on the axis this move belongs to. Angle
+        // and axis are set in the SAME frame and handed over together below —
+        // the donor's hardest-won lesson here, and still true.
+        angle = 0.0f;
         side = (a == ACT_SIDE_FLIP);
-        float dir = (a == ACT_BACKFLIP) ? 1.0f : -1.0f;
-        angle += dir * (2.0f * 3.14159265f / 18.0f);   // ~18 sim ticks = ~0.6 s
-    } else if (angle != 0.0f) {
-        // Ease back rather than snapping: landing should not jolt the view.
-        angle *= 0.80f;
-        if (angle < 0.02f && angle > -0.02f) { angle = 0.0f; }
     }
-    sm64_vr_set_flip(angle, side);
+    wasFlipping = flipping;
+
+    if (flipping && angle < VR_FLIP_TWO_PI) {
+        float dir = (a == ACT_BACKFLIP) ? 1.0f : -1.0f;
+        angle += (VR_FLIP_TWO_PI / VR_FLIP_SECONDS) * dt;
+        if (angle >= VR_FLIP_TWO_PI) { angle = VR_FLIP_TWO_PI; }
+        sm64_vr_set_flip(dir * angle, side);
+        return;
+    }
+    if (!flipping && angle != 0.0f) {
+        // Landed mid-turn: ease the REMAINDER of the revolution out rather than
+        // rewinding, so the view finishes the way the body did.
+        angle += (VR_FLIP_TWO_PI / VR_FLIP_SECONDS) * dt;
+        if (angle >= VR_FLIP_TWO_PI) { angle = 0.0f; }
+        float dir = side ? -1.0f : 1.0f;
+        sm64_vr_set_flip(angle == 0.0f ? 0.0f : dir * angle, side);
+        return;
+    }
+    sm64_vr_set_flip(0.0f, side);
+}
+
+// Switching stick-look mode has to level the pitch. In Turn and Snap the HEADSET
+// owns pitch and the stick only yaws, so whatever pitch the game camera was
+// carrying from Free mode becomes a fixed offset you cannot look out of — dial in
+// Free while looking at your feet, switch to Turn, and you are stuck staring at
+// the floor for good. Austin hit exactly that (2026-08-08).
+void sm64_vr_sync_look_mode(void) {
+    static int prev = -2;
+    int mode = sm64_vr_stick_look_mode();
+    if (mode != prev) {
+        if (prev == 0 && (mode == 1 || mode == 2)) { gFirstPersonCamera.pitch = 0; }
+        prev = mode;
+    }
 }
 
 // D-pad UP cycles the view mode, so switching does not mean opening a menu

@@ -990,8 +990,6 @@ NEW_SKY_DOME = r'''#ifdef SM64_VISION_3D
 static Gfx *build_skybox_sphere_vr(s8 player, s8 background, s8 colorIndex) {
 #define DOME_AZ        16      /* azimuth segments; 8 pinches at the pole */
 #define DOME_SUBV      3       /* fine sub-rings per panorama row */
-#define FADE_START_DEG 30.0f   /* clouds are full below this elevation */
-#define FADE_END_DEG   60.0f   /* fully clear (ENV) above it -> no clouds at the zenith */
     const s32 NRINGS = 8 * DOME_SUBV;   /* 8 panorama rows x sub-rings */
 
     /* 16 fixed commands + 8 per quad — 8 is the same per-tile budget the flat
@@ -1013,11 +1011,15 @@ static Gfx *build_skybox_sphere_vr(s8 player, s8 background, s8 colorIndex) {
     gSPMatrix(g++, VIRTUAL_TO_PHYSICAL(ident), G_MTX_MODELVIEW | G_MTX_LOAD | G_MTX_PUSH);
     gSPDisplayList(g++, dl_skybox_begin);
     gSPDisplayList(g++, dl_skybox_tile_tex_settings);
-    /* Cloud->clear LERP: RGB = (TEXEL0 - ENV) * shade.a + ENV ; A = ENV.a (255,
-       so the output stays opaque). shade.a = 1 -> pure panorama texel, 0 -> the
-       clear-sky ENV colour. */
-    gDPSetCombineLERP(g++, TEXEL0, ENVIRONMENT, SHADE_ALPHA, ENVIRONMENT, 0, 0, 0, ENVIRONMENT,
-                           TEXEL0, ENVIRONMENT, SHADE_ALPHA, ENVIRONMENT, 0, 0, 0, ENVIRONMENT);
+    /* NO custom combiner. The donor's dome LERPs the panorama toward ENVIRONMENT
+       for a cloud->clear fade, on the stated grounds that ENV is "the only
+       guaranteed clear-sky color". That is not true in THIS tree: sSkyboxColors
+       is a white TINT (0xFF,0xFF,0xFF for every level but dark JRB), so the fade
+       ran to pure WHITE and Austin correctly reported the sky going white and
+       flickery when he looked up (device, 2026-08-08). Inheriting the flat
+       skybox's own material instead makes the dome look like the sky the game
+       already draws, which is the whole point of building it from those tiles.
+       Bilerp stays: the 32x32 tiles are visibly point-sampled at dome scale. */
     gDPSetTextureFilter(g++, G_TF_BILERP);
 
     const f32 R        = 1000.0f;   /* game units; translation-free VP => radius sets clipping only */
@@ -1038,8 +1040,6 @@ static Gfx *build_skybox_sphere_vr(s8 player, s8 background, s8 colorIndex) {
         /* V split so the tile is drawn ONCE per row rather than repeated per sub-ring. */
         const s32 vTop = sv       * (31 << 5) / DOME_SUBV;
         const s32 vBot = (sv + 1) * (31 << 5) / DOME_SUBV;
-        const u8 aTop = skybox_dome_fade_alpha(elTopDeg, FADE_START_DEG, FADE_END_DEG);
-        const u8 aBot = skybox_dome_fade_alpha(elBotDeg, FADE_START_DEG, FADE_END_DEG);
 
         for (s32 col = 0; col < DOME_AZ; col++) {
             s32 panCol = col / subPerCol;
@@ -1066,10 +1066,10 @@ static Gfx *build_skybox_sphere_vr(s8 player, s8 background, s8 colorIndex) {
             if (v == NULL) { continue; }
             const f32 az0 = ((f32) col)      / (f32) DOME_AZ * 2.0f * M_PI + camYaw;
             const f32 az1 = ((f32)(col + 1)) / (f32) DOME_AZ * 2.0f * M_PI + camYaw;
-            skybox_dome_vertex(v, 0, R, az0, el0, camPitch, uLeft,  vTop, aTop);
-            skybox_dome_vertex(v, 1, R, az0, el1, camPitch, uLeft,  vBot, aBot);
-            skybox_dome_vertex(v, 2, R, az1, el1, camPitch, uRight, vBot, aBot);
-            skybox_dome_vertex(v, 3, R, az1, el0, camPitch, uRight, vTop, aTop);
+            skybox_dome_vertex(v, 0, R, az0, el0, camPitch, uLeft,  vTop);
+            skybox_dome_vertex(v, 1, R, az0, el1, camPitch, uLeft,  vBot);
+            skybox_dome_vertex(v, 2, R, az1, el1, camPitch, uRight, vBot);
+            skybox_dome_vertex(v, 3, R, az1, el0, camPitch, uRight, vTop);
 
             gLoadBlockTexture(g++, 32, 32, G_IM_FMT_RGBA, tex);
             gSPVertex(g++, VIRTUAL_TO_PHYSICAL(v), 4, 0);
@@ -1083,8 +1083,6 @@ static Gfx *build_skybox_sphere_vr(s8 player, s8 background, s8 colorIndex) {
     gSPEndDisplayList(g);
 #undef DOME_AZ
 #undef DOME_SUBV
-#undef FADE_START_DEG
-#undef FADE_END_DEG
     return dl;
 }
 #endif
@@ -1100,29 +1098,20 @@ t_sky = replace_once(t_sky, OLD_SKY_DOME, NEW_SKY_DOME, "skybox-dome-builder",
 OLD_SKY_HELPERS = "/**\n * Creates the skybox's display list, then draws the 3x3 grid of tiles.\n */"
 NEW_SKY_HELPERS = r'''#ifdef SM64_VISION_3D
 /**
- * Smoothstep cloud->clear ramp for the VR dome: 255 (full panorama) at and below
- * startDeg, 0 (pure ENV clear sky) at and above endDeg.
- */
-static u8 skybox_dome_fade_alpha(f32 elDeg, f32 startDeg, f32 endDeg) {
-    f32 t = (elDeg - startDeg) / (endDeg - startDeg);
-    if (t < 0.0f) { t = 0.0f; }
-    if (t > 1.0f) { t = 1.0f; }
-    return (u8) (255.0f * (1.0f - t * t * (3.0f - 2.0f * t)));
-}
-
-/**
- * One dome vertex: a point on the sphere at (azimuth, elevation), rotated about
- * the X (right) axis by the camera pitch so the horizon stays world-locked as
- * the game camera looks up and down. -Z is the forward base direction.
+ * One VR sky-dome vertex: a point on the sphere at (azimuth, elevation), rotated
+ * about the X (right) axis by the camera pitch so the horizon stays world-locked
+ * as the game camera looks up and down. -Z is the forward base direction. Shade
+ * is flat white — the panorama tile supplies all the colour, exactly as it does
+ * for the flat skybox.
  */
 static void skybox_dome_vertex(Vtx *v, s32 idx, f32 R, f32 az, f32 el, f32 camPitch,
-                               s32 u, s32 tv, u8 a) {
+                               s32 u, s32 tv) {
     f32 x = R * cosf(el) * sinf(az);
     f32 y = R * sinf(el);
     f32 z = -R * cosf(el) * cosf(az);
     f32 y2 =  y * cosf(camPitch) + z * sinf(camPitch);
     f32 z2 = -y * sinf(camPitch) + z * cosf(camPitch);
-    make_vertex(v, idx, (s16) x, (s16) y2, (s16) z2, (s16) u, (s16) tv, 255, 255, 255, a);
+    make_vertex(v, idx, (s16) x, (s16) y2, (s16) z2, (s16) u, (s16) tv, 255, 255, 255, 255);
 }
 #endif
 
@@ -1130,7 +1119,7 @@ static void skybox_dome_vertex(Vtx *v, s32 idx, f32 R, f32 az, f32 el, f32 camPi
  * Creates the skybox's display list, then draws the 3x3 grid of tiles.
  */'''
 t_sky = replace_once(t_sky, OLD_SKY_HELPERS, NEW_SKY_HELPERS, "skybox-dome-helpers",
-                     "static u8 skybox_dome_fade_alpha")
+                     "static void skybox_dome_vertex")
 
 # The swap itself. In VR the dome REPLACES the flat skybox; if the dome cannot be
 # built (pool exhausted) we fall through to the flat one rather than returning

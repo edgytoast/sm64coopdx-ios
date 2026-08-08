@@ -83,6 +83,17 @@ static float sm64_vr_hands_scale(void) {
 static int sLoggedAnchors = 0;
 static int sPollCount = 0;
 
+// ...and the log is the WRONG place for the answer when the person who can run
+// the headset is not the person reading a Mac console. These four counters are
+// surfaced as a row in the VR panel so the answer is readable in-headset:
+//   loads 0            -> the accessory load never even completed
+//   fails > 0          -> ARKit refused this device; hands are impossible here
+//   loads > 0, polls 0 -> the provider never ran
+//   polls > 0, anchors 0 -> tracking runs but reports nothing held
+static int sLoadOK = 0;
+static int sLoadFail = 0;
+static int sLastAnchorCount = 0;
+
 // ---------------------------------------------------------------------------
 // Registration
 // ---------------------------------------------------------------------------
@@ -96,6 +107,7 @@ void sm64_vr_hands_register_device(void *gcController) {
                 if (!successful || accessory == NULL) {
                     // THE ANSWER, if it is no. Logged at the same volume as the
                     // success case so a device round cannot be ambiguous about it.
+                    sLoadFail++;
                     NSLog(@"[vrhands] accessory load FAILED for '%@' (category '%@') — "
                            "no per-hand pose from this device%@",
                           c.vendorName, c.productCategory,
@@ -111,6 +123,7 @@ void sm64_vr_hands_register_device(void *gcController) {
                 sAccessory[sAccessoryCount] = accessory;
                 sAccessoryDevice[sAccessoryCount] = c;
                 sAccessoryCount++;
+                sLoadOK++;
                 sProviderDirty = true;
                 NSLog(@"[vrhands] accessory LOADED: '%s' chirality=%s from '%@' (category '%@') "
                        "— %d accessory(s) known",
@@ -182,6 +195,7 @@ void sm64_vr_hands_poll(void) {
         if (anchors == NULL) { return; }
 
         size_t n = ar_accessory_anchors_get_count(anchors);
+        sLastAnchorCount = (int) n;
         // A bitmask rather than an array: a block cannot capture a C array, and
         // two loose ints would need two __block slots to say one thing.
         __block int seenMask = 0;
@@ -267,6 +281,21 @@ int sm64_vr_hand_matrix(int hand, float out[4][4]) {
     // through — the same identity the EyeVP publish relies on.
     memcpy(out, &M, sizeof(simd_float4x4));
     return 1;
+}
+
+// One line for the VR panel, so the answer is readable in the headset rather
+// than only in a Mac console.
+void sm64_vr_hands_status(char *buf, int len) {
+    if (buf == NULL || len <= 0) { return; }
+    if (sLoadOK == 0 && sLoadFail == 0) {
+        snprintf(buf, (size_t) len, "Hands: no controller seen yet");
+    } else if (sLoadOK == 0) {
+        snprintf(buf, (size_t) len, "Hands: %d device(s) NOT trackable", sLoadFail);
+    } else {
+        snprintf(buf, (size_t) len, "Hands: %d loaded, %d anchor(s), %s%s",
+                 sLoadOK, sLastAnchorCount,
+                 sHandValid[0] ? "L" : "-", sHandValid[1] ? "R" : "-");
+    }
 }
 
 int   sm64_vr_hands_get_enabled(void) { return sm64_vr_hands_enabled(); }

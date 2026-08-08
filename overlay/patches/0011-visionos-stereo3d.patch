@@ -463,7 +463,7 @@ WHAT IS NOT TOUCHED
 +#endif // SM64_VISION_HOST_H
 --- /dev/null
 +++ b/src/pc/vision3d/sm64_vision_host.m
-@@ -0,0 +1,690 @@
+@@ -0,0 +1,691 @@
 +// sm64_vision_host.m — boots the SDL/coopdx engine under the SwiftUI app entry
 +// (visionOS only) and owns the 2D<->3D transition sequencing.
 +//
@@ -763,6 +763,7 @@ WHAT IS NOT TOUCHED
 +        sm64_vr_poll_hotkeys();     // d-pad up cycles the view mode
 +        sm64_vr_anticlip_resolve(); // level collision keeps the view out of walls
 +        sm64_vr_sync_first_person(); // FP mode drives the game's own FP camera
++        sm64_vr_sync_look_mode();    // leaving Free levels the pitch (Turn/Snap yaw only)
 +        sm64_vr_update_flip_cam();   // somersault the view with Mario, if enabled
 +    }
 +
@@ -2929,7 +2930,7 @@ WHAT IS NOT TOUCHED
 +}
 --- /dev/null
 +++ b/src/pc/vision3d/sm64_vr_spike.h
-@@ -0,0 +1,169 @@
+@@ -0,0 +1,174 @@
 +#ifndef SM64_VR_SPIKE_H
 +#define SM64_VR_SPIKE_H
 +
@@ -3051,6 +3052,11 @@ WHAT IS NOT TOUCHED
 +// Keep the game's own first-person camera in step with the VR mode, including
 +// the re-assert that survives a network reset clearing it underneath us.
 +void sm64_vr_sync_first_person(void);
++
++// Level the first-person pitch when the stick-look mode changes away from Free.
++// Turn and Snap give the stick yaw only, so a pitch carried over from Free is an
++// offset you cannot look out of.
++void sm64_vr_sync_look_mode(void);
 +
 +// Flip cam: somersault the view with Mario. The angle and the axis it belongs to
 +// arrive in ONE call on purpose — split, an eased angle lands on the axis the
@@ -4366,7 +4372,7 @@ WHAT IS NOT TOUCHED
 +#endif // DJUI_PANEL_VR_H
 --- /dev/null
 +++ b/src/pc/vision3d/djui_panel_vr.c
-@@ -0,0 +1,195 @@
+@@ -0,0 +1,206 @@
 +// djui_panel_vr.c — the in-game VR options panel (Options -> VR).
 +//
 +// See djui_panel_vr.h for why this exists and what belongs here rather than in
@@ -4386,6 +4392,7 @@ WHAT IS NOT TOUCHED
 +#include "pc/djui/djui_panel.h"
 +#include "pc/djui/djui_panel_menu.h"
 +#include "pc/vision3d/sm64_vr_spike.h"
++#include "pc/vision3d/sm64_vr_hands.h"  // the hands status line
 +
 +// Widget mirrors, in menu units.
 +static unsigned int sUiScale;    // game units per metre (a bigger world number = a smaller world)
@@ -4470,6 +4477,11 @@ WHAT IS NOT TOUCHED
 +    sm64_3d_apply_settings();
 +}
 +
++static char sHandsStatus[64];
++
++// The hands status row is a readout, not a control.
++static void vr_panel_noop(UNUSED struct DjuiBase *caller) { }
++
 +static void vr_panel_recenter(UNUSED struct DjuiBase *caller) {
 +    sm64_vr_spike_recenter();
 +}
@@ -4540,6 +4552,11 @@ WHAT IS NOT TOUCHED
 +        // question on this hardware rather than a given.
 +        djui_checkbox_create(body, "Show Mario Hands", &sUiHands, vr_panel_push);
 +        djui_slider_create(body, "Hand Size", &sUiHandSize, 30, 300, vr_panel_push);
++        // Why there are no hands, readable from inside the headset. A button
++        // purely because DJUI has no static-text row here; it does nothing.
++        // Snapshot taken at panel creation, which is when you come looking.
++        sm64_vr_hands_status(sHandsStatus, (int) sizeof(sHandsStatus));
++        djui_button_create(body, sHandsStatus, DJUI_BUTTON_STYLE_NORMAL, vr_panel_noop);
 +
 +        // Comfort and image.
 +        djui_slider_create(body, "Stereo Depth", &sUiStereo, 0, 100, vr_panel_push);
@@ -4564,7 +4581,7 @@ WHAT IS NOT TOUCHED
 +#endif // SM64_VISION_3D
 --- /dev/null
 +++ b/src/pc/vision3d/sm64_vr_gamestate.c
-@@ -0,0 +1,274 @@
+@@ -0,0 +1,332 @@
 +// sm64_vr_gamestate.c — "is this frame a menu?", answered from the game's own
 +// state machine (charter A5, ported from the donor's vr_frame_is_nongameplay,
 +// pc_main.c:274-305).
@@ -4672,32 +4689,90 @@ WHAT IS NOT TOUCHED
 +// frames while the axis is read from Mario's CURRENT action and switches in one,
 +// so split calls hand a decaying roll to the pitch axis mid-decay and the view
 +// twists onto an axis it was never leaning on.
++// ONE turn, timed, and it stops. The first cut of this was wrong in two ways
++// that compounded into Austin's device report ("it just flickers and does a
++// first person somersault view like MANY times, and isn't smooth at all",
++// 2026-08-08):
++//
++//  1. It advanced a FIXED step per call and this function is called once per
++//     RENDERED frame, not once per sim tick. At 90 Hz against a step sized for
++//     ~18 ticks, a single backflip spun the view several full turns — the "MANY
++//     times". Nothing clamped it either, so a long action just kept going.
++//  2. A fixed step per frame is by definition frame-rate-dependent, so the same
++//     move span a different arc depending on load — the "isn't smooth".
++//
++// Both die the same way: integrate against the CLOCK, not against the call
++// count, and stop dead at one full revolution. A full turn is the identity
++// rotation, so completing it means snapping to zero rather than easing back
++// down through the arc we just came up (which would read as an unwind).
++#define VR_FLIP_SECONDS 0.60f   // one somersault, about the length of the move
++#define VR_FLIP_TWO_PI  6.28318531f
++
 +void sm64_vr_update_flip_cam(void) {
-+    static float angle = 0.0f;
-+    static bool  side = false;
++    static float  angle = 0.0f;
++    static bool   side = false;
++    static bool   wasFlipping = false;
++    static double lastTime = -1.0;
++
++    double now = clock_elapsed_f64();
++    float dt = (lastTime < 0.0) ? 0.0f : (float) (now - lastTime);
++    lastTime = now;
++    // A long stall (loading, a menu) must not teleport the view a third of a turn.
++    if (dt > 0.1f) { dt = 0.1f; }
 +
 +    struct MarioState *m = &gMarioStates[0];
 +    bool on = sm64_vr_first_person_active()
 +           && sm64_3d_setting_f("vrFlipCam", SM64_DEF_VRFLIPCAM) > 0.5f;
 +    if (!on || m == NULL) {
-+        if (angle != 0.0f) { angle = 0.0f; sm64_vr_set_flip(0.0f, false); }
++        if (angle != 0.0f || wasFlipping) {
++            angle = 0.0f; wasFlipping = false; sm64_vr_set_flip(0.0f, false);
++        }
 +        return;
 +    }
 +
 +    u32 a = m->action;
 +    bool flipping = (a == ACT_TRIPLE_JUMP) || (a == ACT_BACKFLIP) || (a == ACT_SIDE_FLIP);
-+    if (flipping) {
-+        // One full turn over roughly the length of the move. Read the axis in the
-+        // SAME frame as the angle, and hand both over together (below).
++
++    if (flipping && !wasFlipping) {
++        // A fresh flip starts from level on the axis this move belongs to. Angle
++        // and axis are set in the SAME frame and handed over together below —
++        // the donor's hardest-won lesson here, and still true.
++        angle = 0.0f;
 +        side = (a == ACT_SIDE_FLIP);
-+        float dir = (a == ACT_BACKFLIP) ? 1.0f : -1.0f;
-+        angle += dir * (2.0f * 3.14159265f / 18.0f);   // ~18 sim ticks = ~0.6 s
-+    } else if (angle != 0.0f) {
-+        // Ease back rather than snapping: landing should not jolt the view.
-+        angle *= 0.80f;
-+        if (angle < 0.02f && angle > -0.02f) { angle = 0.0f; }
 +    }
-+    sm64_vr_set_flip(angle, side);
++    wasFlipping = flipping;
++
++    if (flipping && angle < VR_FLIP_TWO_PI) {
++        float dir = (a == ACT_BACKFLIP) ? 1.0f : -1.0f;
++        angle += (VR_FLIP_TWO_PI / VR_FLIP_SECONDS) * dt;
++        if (angle >= VR_FLIP_TWO_PI) { angle = VR_FLIP_TWO_PI; }
++        sm64_vr_set_flip(dir * angle, side);
++        return;
++    }
++    if (!flipping && angle != 0.0f) {
++        // Landed mid-turn: ease the REMAINDER of the revolution out rather than
++        // rewinding, so the view finishes the way the body did.
++        angle += (VR_FLIP_TWO_PI / VR_FLIP_SECONDS) * dt;
++        if (angle >= VR_FLIP_TWO_PI) { angle = 0.0f; }
++        float dir = side ? -1.0f : 1.0f;
++        sm64_vr_set_flip(angle == 0.0f ? 0.0f : dir * angle, side);
++        return;
++    }
++    sm64_vr_set_flip(0.0f, side);
++}
++
++// Switching stick-look mode has to level the pitch. In Turn and Snap the HEADSET
++// owns pitch and the stick only yaws, so whatever pitch the game camera was
++// carrying from Free mode becomes a fixed offset you cannot look out of — dial in
++// Free while looking at your feet, switch to Turn, and you are stuck staring at
++// the floor for good. Austin hit exactly that (2026-08-08).
++void sm64_vr_sync_look_mode(void) {
++    static int prev = -2;
++    int mode = sm64_vr_stick_look_mode();
++    if (mode != prev) {
++        if (prev == 0 && (mode == 1 || mode == 2)) { gFirstPersonCamera.pitch = 0; }
++        prev = mode;
++    }
 +}
 +
 +// D-pad UP cycles the view mode, so switching does not mean opening a menu
@@ -5338,7 +5413,7 @@ WHAT IS NOT TOUCHED
 +#endif // SM64_VISION_3D
 --- /dev/null
 +++ b/src/pc/vision3d/sm64_vr_hands.h
-@@ -0,0 +1,41 @@
+@@ -0,0 +1,46 @@
 +// sm64_vr_hands.h — Mario's hands on your controllers (charter R4, Austin 2026-08-08).
 +//
 +// Pure C so gfx_pc.c can include it. The Objective-C / ARKit side lives in
@@ -5379,10 +5454,15 @@ WHAT IS NOT TOUCHED
 +int   sm64_vr_hands_get_enabled(void);
 +float sm64_vr_hands_get_scale(void);
 +
++// One human-readable line of "why are there no hands", for the VR panel. The
++// person who can run the headset is not the person who can read a Mac console,
++// so the answer has to be legible from inside.
++void sm64_vr_hands_status(char *buf, int len);
++
 +#endif // SM64_VR_HANDS_H
 --- /dev/null
 +++ b/src/pc/vision3d/sm64_vr_hands.m
-@@ -0,0 +1,275 @@
+@@ -0,0 +1,304 @@
 +// sm64_vr_hands.m — accessory poses, so Mario's hands can be YOUR hands.
 +//
 +// THE OPEN QUESTION THIS FILE EXISTS TO ANSWER. On this system the PSVR2 Sense
@@ -5468,6 +5548,17 @@ WHAT IS NOT TOUCHED
 +static int sLoggedAnchors = 0;
 +static int sPollCount = 0;
 +
++// ...and the log is the WRONG place for the answer when the person who can run
++// the headset is not the person reading a Mac console. These four counters are
++// surfaced as a row in the VR panel so the answer is readable in-headset:
++//   loads 0            -> the accessory load never even completed
++//   fails > 0          -> ARKit refused this device; hands are impossible here
++//   loads > 0, polls 0 -> the provider never ran
++//   polls > 0, anchors 0 -> tracking runs but reports nothing held
++static int sLoadOK = 0;
++static int sLoadFail = 0;
++static int sLastAnchorCount = 0;
++
 +// ---------------------------------------------------------------------------
 +// Registration
 +// ---------------------------------------------------------------------------
@@ -5481,6 +5572,7 @@ WHAT IS NOT TOUCHED
 +                if (!successful || accessory == NULL) {
 +                    // THE ANSWER, if it is no. Logged at the same volume as the
 +                    // success case so a device round cannot be ambiguous about it.
++                    sLoadFail++;
 +                    NSLog(@"[vrhands] accessory load FAILED for '%@' (category '%@') — "
 +                           "no per-hand pose from this device%@",
 +                          c.vendorName, c.productCategory,
@@ -5496,6 +5588,7 @@ WHAT IS NOT TOUCHED
 +                sAccessory[sAccessoryCount] = accessory;
 +                sAccessoryDevice[sAccessoryCount] = c;
 +                sAccessoryCount++;
++                sLoadOK++;
 +                sProviderDirty = true;
 +                NSLog(@"[vrhands] accessory LOADED: '%s' chirality=%s from '%@' (category '%@') "
 +                       "— %d accessory(s) known",
@@ -5567,6 +5660,7 @@ WHAT IS NOT TOUCHED
 +        if (anchors == NULL) { return; }
 +
 +        size_t n = ar_accessory_anchors_get_count(anchors);
++        sLastAnchorCount = (int) n;
 +        // A bitmask rather than an array: a block cannot capture a C array, and
 +        // two loose ints would need two __block slots to say one thing.
 +        __block int seenMask = 0;
@@ -5652,6 +5746,21 @@ WHAT IS NOT TOUCHED
 +    // through — the same identity the EyeVP publish relies on.
 +    memcpy(out, &M, sizeof(simd_float4x4));
 +    return 1;
++}
++
++// One line for the VR panel, so the answer is readable in the headset rather
++// than only in a Mac console.
++void sm64_vr_hands_status(char *buf, int len) {
++    if (buf == NULL || len <= 0) { return; }
++    if (sLoadOK == 0 && sLoadFail == 0) {
++        snprintf(buf, (size_t) len, "Hands: no controller seen yet");
++    } else if (sLoadOK == 0) {
++        snprintf(buf, (size_t) len, "Hands: %d device(s) NOT trackable", sLoadFail);
++    } else {
++        snprintf(buf, (size_t) len, "Hands: %d loaded, %d anchor(s), %s%s",
++                 sLoadOK, sLastAnchorCount,
++                 sHandValid[0] ? "L" : "-", sHandValid[1] ? "R" : "-");
++    }
 +}
 +
 +int   sm64_vr_hands_get_enabled(void) { return sm64_vr_hands_enabled(); }
@@ -6229,10 +6338,11 @@ WHAT IS NOT TOUCHED
          djui_button_create(body, DLANG(MENU, BACK), DJUI_BUTTON_STYLE_BACK, djui_panel_options_back);
 --- a/src/game/skybox.c
 +++ b/src/game/skybox.c
-@@ -14,6 +14,20 @@
+@@ -13,6 +13,20 @@
+ #include "geo_commands.h"
  #include "hardcoded.h"
  #include "skybox.h"
- 
++
 +// visionOS stereo (overlay 0011, P1-a): SM64's skybox is ORTHO, so the
 +// ortho-not-offset gate would leave it at zero disparity = on the panel,
 +// stereoscopically in FRONT of the world painted behind it. Bracket the
@@ -6246,11 +6356,10 @@ WHAT IS NOT TOUCHED
 +// and drags CompositorServices into a plain game translation unit.
 +int sm64_vr_sky_dome_active(void);
 +#endif
-+
+ 
  /**
   * @file skybox.c
-  *
-@@ -278,15 +292,47 @@
+@@ -278,7 +292,26 @@
      }
  
      return mtx;
@@ -6258,35 +6367,26 @@ WHAT IS NOT TOUCHED
 +
 +#ifdef SM64_VISION_3D
 +/**
-+ * Smoothstep cloud->clear ramp for the VR dome: 255 (full panorama) at and below
-+ * startDeg, 0 (pure ENV clear sky) at and above endDeg.
-+ */
-+static u8 skybox_dome_fade_alpha(f32 elDeg, f32 startDeg, f32 endDeg) {
-+    f32 t = (elDeg - startDeg) / (endDeg - startDeg);
-+    if (t < 0.0f) { t = 0.0f; }
-+    if (t > 1.0f) { t = 1.0f; }
-+    return (u8) (255.0f * (1.0f - t * t * (3.0f - 2.0f * t)));
- }
- 
- /**
-+ * One dome vertex: a point on the sphere at (azimuth, elevation), rotated about
-+ * the X (right) axis by the camera pitch so the horizon stays world-locked as
-+ * the game camera looks up and down. -Z is the forward base direction.
++ * One VR sky-dome vertex: a point on the sphere at (azimuth, elevation), rotated
++ * about the X (right) axis by the camera pitch so the horizon stays world-locked
++ * as the game camera looks up and down. -Z is the forward base direction. Shade
++ * is flat white — the panorama tile supplies all the colour, exactly as it does
++ * for the flat skybox.
 + */
 +static void skybox_dome_vertex(Vtx *v, s32 idx, f32 R, f32 az, f32 el, f32 camPitch,
-+                               s32 u, s32 tv, u8 a) {
++                               s32 u, s32 tv) {
 +    f32 x = R * cosf(el) * sinf(az);
 +    f32 y = R * sinf(el);
 +    f32 z = -R * cosf(el) * cosf(az);
 +    f32 y2 =  y * cosf(camPitch) + z * sinf(camPitch);
 +    f32 z2 = -y * sinf(camPitch) + z * cosf(camPitch);
-+    make_vertex(v, idx, (s16) x, (s16) y2, (s16) z2, (s16) u, (s16) tv, 255, 255, 255, a);
-+}
++    make_vertex(v, idx, (s16) x, (s16) y2, (s16) z2, (s16) u, (s16) tv, 255, 255, 255, 255);
+ }
 +#endif
-+
-+/**
+ 
+ /**
   * Creates the skybox's display list, then draws the 3x3 grid of tiles.
-  */
+@@ -286,7 +319,11 @@
  Gfx *init_skybox_display_list(s8 player, s8 background, s8 colorIndex) {
      extern Gfx* gBackgroundSkyboxGfx;
  
@@ -6298,7 +6398,7 @@ WHAT IS NOT TOUCHED
  
      void *skybox;
      if (gRenderingInterpolated) {
-@@ -304,9 +350,15 @@
+@@ -304,9 +341,15 @@
          Mtx *ortho = create_skybox_ortho_matrix(player);
  
          gSPDisplayList(dlist++, dl_skybox_begin);
@@ -6314,7 +6414,7 @@ WHAT IS NOT TOUCHED
          gSPDisplayList(dlist++, dl_skybox_end);
          gSPEndDisplayList(dlist);
      }
-@@ -324,6 +376,115 @@
+@@ -324,6 +367,113 @@
   * @param posX,posY,posZ The camera's position
   * @param focX,focY,focZ The camera's focus.
   */
@@ -6328,8 +6428,6 @@ WHAT IS NOT TOUCHED
 +static Gfx *build_skybox_sphere_vr(s8 player, s8 background, s8 colorIndex) {
 +#define DOME_AZ        16      /* azimuth segments; 8 pinches at the pole */
 +#define DOME_SUBV      3       /* fine sub-rings per panorama row */
-+#define FADE_START_DEG 30.0f   /* clouds are full below this elevation */
-+#define FADE_END_DEG   60.0f   /* fully clear (ENV) above it -> no clouds at the zenith */
 +    const s32 NRINGS = 8 * DOME_SUBV;   /* 8 panorama rows x sub-rings */
 +
 +    /* 16 fixed commands + 8 per quad — 8 is the same per-tile budget the flat
@@ -6351,11 +6449,15 @@ WHAT IS NOT TOUCHED
 +    gSPMatrix(g++, VIRTUAL_TO_PHYSICAL(ident), G_MTX_MODELVIEW | G_MTX_LOAD | G_MTX_PUSH);
 +    gSPDisplayList(g++, dl_skybox_begin);
 +    gSPDisplayList(g++, dl_skybox_tile_tex_settings);
-+    /* Cloud->clear LERP: RGB = (TEXEL0 - ENV) * shade.a + ENV ; A = ENV.a (255,
-+       so the output stays opaque). shade.a = 1 -> pure panorama texel, 0 -> the
-+       clear-sky ENV colour. */
-+    gDPSetCombineLERP(g++, TEXEL0, ENVIRONMENT, SHADE_ALPHA, ENVIRONMENT, 0, 0, 0, ENVIRONMENT,
-+                           TEXEL0, ENVIRONMENT, SHADE_ALPHA, ENVIRONMENT, 0, 0, 0, ENVIRONMENT);
++    /* NO custom combiner. The donor's dome LERPs the panorama toward ENVIRONMENT
++       for a cloud->clear fade, on the stated grounds that ENV is "the only
++       guaranteed clear-sky color". That is not true in THIS tree: sSkyboxColors
++       is a white TINT (0xFF,0xFF,0xFF for every level but dark JRB), so the fade
++       ran to pure WHITE and Austin correctly reported the sky going white and
++       flickery when he looked up (device, 2026-08-08). Inheriting the flat
++       skybox's own material instead makes the dome look like the sky the game
++       already draws, which is the whole point of building it from those tiles.
++       Bilerp stays: the 32x32 tiles are visibly point-sampled at dome scale. */
 +    gDPSetTextureFilter(g++, G_TF_BILERP);
 +
 +    const f32 R        = 1000.0f;   /* game units; translation-free VP => radius sets clipping only */
@@ -6376,8 +6478,6 @@ WHAT IS NOT TOUCHED
 +        /* V split so the tile is drawn ONCE per row rather than repeated per sub-ring. */
 +        const s32 vTop = sv       * (31 << 5) / DOME_SUBV;
 +        const s32 vBot = (sv + 1) * (31 << 5) / DOME_SUBV;
-+        const u8 aTop = skybox_dome_fade_alpha(elTopDeg, FADE_START_DEG, FADE_END_DEG);
-+        const u8 aBot = skybox_dome_fade_alpha(elBotDeg, FADE_START_DEG, FADE_END_DEG);
 +
 +        for (s32 col = 0; col < DOME_AZ; col++) {
 +            s32 panCol = col / subPerCol;
@@ -6404,10 +6504,10 @@ WHAT IS NOT TOUCHED
 +            if (v == NULL) { continue; }
 +            const f32 az0 = ((f32) col)      / (f32) DOME_AZ * 2.0f * M_PI + camYaw;
 +            const f32 az1 = ((f32)(col + 1)) / (f32) DOME_AZ * 2.0f * M_PI + camYaw;
-+            skybox_dome_vertex(v, 0, R, az0, el0, camPitch, uLeft,  vTop, aTop);
-+            skybox_dome_vertex(v, 1, R, az0, el1, camPitch, uLeft,  vBot, aBot);
-+            skybox_dome_vertex(v, 2, R, az1, el1, camPitch, uRight, vBot, aBot);
-+            skybox_dome_vertex(v, 3, R, az1, el0, camPitch, uRight, vTop, aTop);
++            skybox_dome_vertex(v, 0, R, az0, el0, camPitch, uLeft,  vTop);
++            skybox_dome_vertex(v, 1, R, az0, el1, camPitch, uLeft,  vBot);
++            skybox_dome_vertex(v, 2, R, az1, el1, camPitch, uRight, vBot);
++            skybox_dome_vertex(v, 3, R, az1, el0, camPitch, uRight, vTop);
 +
 +            gLoadBlockTexture(g++, 32, 32, G_IM_FMT_RGBA, tex);
 +            gSPVertex(g++, VIRTUAL_TO_PHYSICAL(v), 4, 0);
@@ -6421,8 +6521,6 @@ WHAT IS NOT TOUCHED
 +    gSPEndDisplayList(g);
 +#undef DOME_AZ
 +#undef DOME_SUBV
-+#undef FADE_START_DEG
-+#undef FADE_END_DEG
 +    return dl;
 +}
 +#endif
@@ -6430,7 +6528,7 @@ WHAT IS NOT TOUCHED
  Gfx *create_skybox_facing_camera(s8 player, s8 background, f32 fov,
                                      f32 posX, f32 posY, f32 posZ,
                                      f32 focX, f32 focY, f32 focZ) {
-@@ -373,5 +534,14 @@
+@@ -373,5 +523,14 @@
      sSkyBoxInfo[player].scaledX = calculate_skybox_scaled_x(player, fov);
      sSkyBoxInfo[player].scaledY = calculate_skybox_scaled_y(player, fov);
  

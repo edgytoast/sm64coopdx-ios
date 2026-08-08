@@ -120,6 +120,11 @@ void sm64_vr_poll_hotkeys(void);
 // the re-assert that survives a network reset clearing it underneath us.
 void sm64_vr_sync_first_person(void);
 
+// Level the first-person pitch when the stick-look mode changes away from Free.
+// Turn and Snap give the stick yaw only, so a pitch carried over from Free is an
+// offset you cannot look out of.
+void sm64_vr_sync_look_mode(void);
+
 // Flip cam: somersault the view with Mario. The angle and the axis it belongs to
 // arrive in ONE call on purpose — split, an eased angle lands on the axis the
 // next move just switched to.

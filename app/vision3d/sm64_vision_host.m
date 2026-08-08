@@ -402,7 +402,7 @@ static void SM64_SetCurtain(bool show) {
         sm64_curtain.backgroundColor = UIColor.blackColor;
         sm64_curtain.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
         UILabel *l = [UILabel new];
-        l.text = @"Playing in 3D";
+        l.text = (sm64_vr_spike_variant != 0) ? @"Playing in VR" : @"Playing in 3D";
         l.numberOfLines = 0;
         l.textAlignment = NSTextAlignmentCenter;
         l.textColor = [UIColor colorWithWhite:0.75 alpha:1.0];

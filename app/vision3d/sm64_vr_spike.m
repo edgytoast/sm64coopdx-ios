@@ -69,6 +69,12 @@ static float sVrStereo = 1.00f;   // eye offset as a fraction of the true IPD (1
 static const float kVrClipMargin = 0.30f; // donor sClipMargin: minimum anchor standoff
 static float sVrClipPush = 0.0f;          // the eased anti-clip pushback, metres
 
+// Panel mode (charter A5), read by BOTH threads: the engine (whose VR accessors
+// go NULL so the game renders its own flat projection) and this loop (which then
+// draws that frame on a world-locked screen). Declared here because the eye
+// sizer above needs it too — a menu renders at a screen's shape, not a view's.
+static volatile int sVrPanelMode = 0;
+
 static float sVrEyeVP[2][4][4];
 static float sVrHudVP[2][4][4];
 static volatile int sVrValid = 0;      // read by the ENGINE thread
@@ -103,7 +109,19 @@ void sm64_vr_spike_set_render_scale(float s) {
 int sm64_vr_spike_render_size(int *w, int *h) {
     int vw = sVrViewW, vh = sVrViewH;
     if (!sVrValid || vw < 64 || vh < 64) { return 0; }
-    int rw = (int)(vw * sVrRenderScale), rh = (int)(vh * sVrRenderScale);
+    int rw, rh;
+    if (sVrPanelMode) {
+        // A SCREEN, not a view: 16:9, because that is the shape the game's menus
+        // and HUD are laid out for. Rendering them into the view's boxy 1.25
+        // aspect made the menu both squat and too tall for its own frame — the
+        // clipped top Austin hit. Costs a texture reallocation when a menu opens,
+        // which is a frame boundary and not gameplay.
+        rw = (int)(vw * sVrRenderScale);
+        rh = (int)(rw * 9.0f / 16.0f);
+    } else {
+        rw = (int)(vw * sVrRenderScale);
+        rh = (int)(vh * sVrRenderScale);
+    }
     rw = ((rw + 64) / 128) * 128;   // quantise so a slider DRAG cannot thrash
     rh = ((rh + 64) / 128) * 128;   // the texture allocation every pixel
     if (rw < 640) { rw = 640; }
@@ -134,7 +152,6 @@ void sm64_vr_spike_set_world_lock(int on) { sVrWorldLock = on ? 1 : 0; }
 // instead of across your whole view). A one-frame disagreement at a menu
 // boundary is harmless — the frame is either flat-on-a-panel or stereo, never a
 // mixture, because both sides read the same flag.
-static volatile int sVrPanelMode = 0;
 void sm64_vr_spike_set_panel_mode(int on) { sVrPanelMode = on ? 1 : 0; }
 int  sm64_vr_spike_panel_mode(void) { return sVrPanelMode; }
 
@@ -380,9 +397,10 @@ static simd_float4x4 sm64_vr_placement(simd_float4x4 frozenHead, simd_float4x4 l
 // same head pose the world is. Distance and size are fixed for now — the point
 // of this screen is legibility, not another slider.
 static const float kVrPanelDist  = 2.6f;
-static const float kVrPanelHalfH = 1.05f;   // half-width follows the texture aspect;
-                                            // ~2.1 m tall at 2.6 m, a big-screen feel
-                                            // rather than a floating dialog
+static const float kVrPanelHalfH = 0.95f;   // ~1.9 m tall at 2.6 m; the width follows
+                                            // the (now 16:9) render, so ~3.4 m across
+static const float kVrPanelDrop  = 0.20f;   // metres below eye level — dead level reads
+                                            // as slightly too high to sit and look at
 
 static simd_float4x4 sm64_vr_panel_placement(simd_float4x4 frozenHead) {
     simd_float3 headPos = frozenHead.columns[3].xyz;
@@ -391,6 +409,7 @@ static simd_float4x4 sm64_vr_panel_placement(simd_float4x4 frozenHead) {
     float len = simd_length(fwd);
     fwd = (len < 1e-4f) ? simd_make_float3(0, 0, -1) : fwd / len;
     simd_float3 pos = headPos + fwd * kVrPanelDist;
+    pos.y -= kVrPanelDrop;
 
     simd_float3 zAxis = -fwd;
     simd_float3 yAxis = simd_make_float3(0, 1, 0);
@@ -945,9 +964,15 @@ void sm64_vr_spike_run(void *layer_renderer_ptr, int variant) {
                         cpProj = cp_drawable_compute_projection(
                             drawable, cp_axis_direction_convention_right_up_back, v);
                     }
+                    // The panel is PLACED from the anchored head (so it stays
+                    // put in the room) but VIEWED from the LIVE one — using the
+                    // frozen head for both is what glued it to your face, so you
+                    // could never look up at the top of a menu. Same rule the
+                    // world follows.
                     simd_float4x4 deviceFromEye = cp_view_get_transform(vw);
+                    simd_float4x4 panelViewHead = sVrWorldLock ? liveHead : frozenHead;
                     simd_float4x4 eyeFromOrigin =
-                        simd_inverse(simd_mul(frozenHead, deviceFromEye));
+                        simd_inverse(simd_mul(panelViewHead, deviceFromEye));
 
                     // Sized from the TEXTURE's aspect, so the flat frame fills
                     // the quad exactly — the engine renders at the VR view's

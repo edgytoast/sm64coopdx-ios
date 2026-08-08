@@ -93,6 +93,7 @@ static int sPollCount = 0;
 static int sLoadOK = 0;
 static int sLoadFail = 0;
 static int sLastAnchorCount = 0;
+static int sLoadFailCode = 0;   // ar_error code from the last failed load
 
 // Authorization. THE BUG behind "N devices NOT trackable" on 1.1.2.19: nothing
 // ever called ar_session_request_authorization, so accessory tracking was never
@@ -119,10 +120,23 @@ static void hands_load_device(GCController *c) {
             (void)device;
             if (!successful || accessory == NULL) {
                 sLoadFail++;
-                NSLog(@"[vrhands] accessory load FAILED for '%@' (category '%@') — "
-                       "no per-hand pose from this device%@",
-                      c.vendorName, c.productCategory,
-                      error ? @"" : @" (no error object)");
+                // The ERROR CODE, captured rather than summarised. 1200 is
+                // ar_accessory_tracking_error_code_accessory_loading_failed, the
+                // only code the accessory header documents; anything else is a
+                // fact worth having. Surfaced in the status line too, because the
+                // headset is where this gets read.
+                long code = -1;
+                CFStringRef desc = NULL;
+                if (error != NULL) {
+                    code = (long) ar_error_get_error_code(error);
+                    CFErrorRef cfe = ar_error_copy_cf_error(error);
+                    if (cfe != NULL) { desc = CFErrorCopyDescription(cfe); CFRelease(cfe); }
+                }
+                sLoadFailCode = (int) code;
+                NSLog(@"[vrhands] accessory load FAILED for '%@' (category '%@') "
+                       "code=%ld desc=%@",
+                      c.vendorName, c.productCategory, code, desc ? (__bridge NSString *)desc : @"(none)");
+                if (desc != NULL) { CFRelease(desc); }
                 return;
             }
             if (sAccessoryCount >= SM64_VR_MAX_ACCESSORIES) {
@@ -353,7 +367,8 @@ void sm64_vr_hands_status(char *buf, int len) {
     } else if (sLoadOK == 0 && sLoadFail == 0) {
         snprintf(buf, (size_t) len, "Hands: allowed, no controller seen");
     } else if (sLoadOK == 0) {
-        snprintf(buf, (size_t) len, "Hands: allowed, %d device(s) NOT trackable", sLoadFail);
+        snprintf(buf, (size_t) len, "Hands: allowed, %d not trackable (err %d)",
+                 sLoadFail, sLoadFailCode);
     } else {
         snprintf(buf, (size_t) len, "Hands: %d loaded, %d anchor(s), %s%s",
                  sLoadOK, sLastAnchorCount,

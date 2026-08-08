@@ -4372,7 +4372,7 @@ WHAT IS NOT TOUCHED
 +#endif // DJUI_PANEL_VR_H
 --- /dev/null
 +++ b/src/pc/vision3d/djui_panel_vr.c
-@@ -0,0 +1,206 @@
+@@ -0,0 +1,217 @@
 +// djui_panel_vr.c — the in-game VR options panel (Options -> VR).
 +//
 +// See djui_panel_vr.h for why this exists and what belongs here rather than in
@@ -4392,6 +4392,7 @@ WHAT IS NOT TOUCHED
 +#include "pc/djui/djui_panel.h"
 +#include "pc/djui/djui_panel_menu.h"
 +#include "pc/vision3d/sm64_vr_spike.h"
++#include <stdio.h>
 +#include "pc/vision3d/sm64_vr_hands.h"  // the hands status line
 +
 +// Widget mirrors, in menu units.
@@ -4478,6 +4479,7 @@ WHAT IS NOT TOUCHED
 +}
 +
 +static char sHandsStatus[64];
++static char sTexStatus[64];
 +
 +// The hands status row is a readout, not a control.
 +static void vr_panel_noop(UNUSED struct DjuiBase *caller) { }
@@ -4557,6 +4559,15 @@ WHAT IS NOT TOUCHED
 +        // Snapshot taken at panel creation, which is when you come looking.
 +        sm64_vr_hands_status(sHandsStatus, (int) sizeof(sHandsStatus));
 +        djui_button_create(body, sHandsStatus, DJUI_BUTTON_STYLE_NORMAL, vr_panel_noop);
++        // Texture-cache wraps. Non-zero means the cache is recycling, which is
++        // the condition the white-sky bug needed; zero means the cause is gone
++        // rather than merely masked by the Metal texture-lifetime fix.
++        {
++            extern int sm64_gfx_texture_wraps(void);
++            snprintf(sTexStatus, sizeof(sTexStatus), "Texture cache wraps: %d",
++                     sm64_gfx_texture_wraps());
++            djui_button_create(body, sTexStatus, DJUI_BUTTON_STYLE_NORMAL, vr_panel_noop);
++        }
 +
 +        // Comfort and image.
 +        djui_slider_create(body, "Stereo Depth", &sUiStereo, 0, 100, vr_panel_push);
@@ -5859,10 +5870,24 @@ WHAT IS NOT TOUCHED
 +#endif // SM64_VISION_3D
 --- a/src/pc/gfx/gfx_pc.c
 +++ b/src/pc/gfx/gfx_pc.c
-@@ -658,7 +658,205 @@
+@@ -343,6 +343,12 @@
+     if (gfx_texture_cache.pool_pos >= sizeof(gfx_texture_cache.pool) / sizeof(struct TextureHashmapNode)) {
+         // Pool is full. We just invalidate everything and start over.
+         gfx_texture_cache.pool_pos = 0;
++#ifdef SM64_VISION_3D
++        // The chains MUST go with it, or lookups follow previous-generation
++        // `next` pointers into recycled slots. See overlay 0011 section 2e.
++        memset(gfx_texture_cache.hashmap, 0, sizeof(gfx_texture_cache.hashmap));
++        sm64_gfx_tex_wraps++;
++#endif
+         node = &gfx_texture_cache.hashmap[hash];
+         // puts("Clearing texture cache");
+     }
+@@ -657,7 +663,212 @@
+ 
      gfx_transposed_matrix_mul(coeffs, light_dir, rsp.modelview_matrix_stack[rsp.modelview_matrix_stack_size - 1]);
      vec3f_normalize(coeffs);
- }
++}
 +
 +// ---------------------------------------------------------------------------
 +// visionOS stereoscopic 3D — the per-eye projection (overlay 0011, Phase 2).
@@ -5909,6 +5934,13 @@ WHAT IS NOT TOUCHED
 +// Without that swap the dome carries the eye's own translation and both eyes see
 +// different parallax on it — sky that reads as a ball an arm's length away.
 +static int sm64_gfx_sky_layer = 0;
++
++// Texture-cache wraps this session (section 2e). Surfaced in the VR panel: a
++// non-zero value means the cache is recycling, which is the condition the
++// white-sky bug needed. Zero after the fixes means the cause is gone rather
++// than merely masked.
++int sm64_gfx_tex_wraps = 0;
++int sm64_gfx_texture_wraps(void) { return sm64_gfx_tex_wraps; }
 +
 +// P[0][0] of the last-seen PERSPECTIVE projection, latched live because SM64's
 +// FOV animates (don't hard-code it). The ortho disparity math needs this scale,
@@ -5985,7 +6017,7 @@ WHAT IS NOT TOUCHED
 +            return sm64_gfx_eye_P;
 +        }
 +    }
- 
++
 +    // Signed half-separation for this eye.
 +    const float e = (sm64_gfx_3d_eye == SM64_EYE_RIGHT ? 1.0f : -1.0f) * 0.5f * sm64_gfx_3d_sep;
 +
@@ -6056,16 +6088,15 @@ WHAT IS NOT TOUCHED
 +    sm64_gfx_eye_P[2][0] += -rsp.P_matrix[0][0] * e / sm64_gfx_3d_conv;
 +
 +    return sm64_gfx_eye_P;
-+}
+ }
 +#define GFX_PROJECTION() gfx_stereo_projection()
 +#else
 +#define GFX_PROJECTION() rsp.P_matrix
 +#endif
-+
+ 
  static void OPTIMIZE_O3 gfx_sp_matrix(uint8_t parameters, const int32_t *addr) {
  
-     Mat4 matrix;
-@@ -705,7 +903,7 @@
+@@ -705,7 +916,7 @@
          }
          rsp.lights_changed = 1;
      }
@@ -6074,7 +6105,7 @@ WHAT IS NOT TOUCHED
  }
  
  static void gfx_sp_pop_matrix(uint32_t count) {
-@@ -713,13 +911,19 @@
+@@ -713,13 +924,19 @@
          if (rsp.modelview_matrix_stack_size > 0) {
              --rsp.modelview_matrix_stack_size;
              if (rsp.modelview_matrix_stack_size > 0) {
@@ -6095,7 +6126,7 @@ WHAT IS NOT TOUCHED
      float adjusted = x * gfx_current_dimensions.x_adjust_ratio;
  
      // Force 2D coordinates to be aligned perfectly on the nearest pixel
-@@ -2050,6 +2254,16 @@
+@@ -2050,6 +2267,16 @@
  }
  
  static void gfx_sp_reset(void) {
@@ -6112,7 +6143,7 @@ WHAT IS NOT TOUCHED
      rsp.modelview_matrix_stack_size = 1;
      rsp.current_num_lights = 2;
      rsp.lights_changed = true;
-@@ -2076,7 +2290,89 @@
+@@ -2076,7 +2303,89 @@
  
  struct GfxRenderingAPI *gfx_get_current_rendering_api(void) {
      return gfx_rapi;
@@ -6202,7 +6233,7 @@ WHAT IS NOT TOUCHED
  
  void gfx_start_frame(void) {
      if (gGfxPcResetTex1 > 0) {
-@@ -2086,6 +2382,21 @@
+@@ -2086,6 +2395,21 @@
      }
      gfx_wapi->handle_events();
      gfx_wapi->get_dimensions(&gfx_current_dimensions.width, &gfx_current_dimensions.height);
@@ -6224,7 +6255,7 @@ WHAT IS NOT TOUCHED
      if (gfx_current_dimensions.height == 0) {
          // Avoid division by zero
          gfx_current_dimensions.height = 1;
-@@ -2100,6 +2411,46 @@
+@@ -2100,6 +2424,46 @@
  }
  
  void gfx_run(Gfx *commands) {
@@ -6271,7 +6302,7 @@ WHAT IS NOT TOUCHED
      gfx_sp_reset();
  
      sHasInverseCameraMatrix = false;
-@@ -2115,6 +2466,9 @@
+@@ -2115,6 +2479,9 @@
      //double t0 = gfx_wapi->get_time();
      gfx_rapi->start_frame();
      gfx_run_dl(commands);
@@ -6281,7 +6312,7 @@ WHAT IS NOT TOUCHED
  }
  
  void gfx_end_frame_render(void) {
-@@ -2458,6 +2812,21 @@
+@@ -2458,6 +2825,21 @@
  void OPTIMIZE_O3 ext_gfx_run_dl(Gfx* cmd) {
      uint32_t opcode = cmd->words.w0 >> 24;
      switch (opcode) {
@@ -6449,14 +6480,12 @@ WHAT IS NOT TOUCHED
  
  /**
   * @file skybox.c
-@@ -278,7 +292,26 @@
-     }
- 
+@@ -280,13 +294,36 @@
      return mtx;
-+}
-+
+ }
+ 
 +#ifdef SM64_VISION_3D
-+/**
+ /**
 + * One VR sky-dome vertex: a point on the sphere at (azimuth, elevation), rotated
 + * about the X (right) axis by the camera pitch so the horizon stays world-locked
 + * as the game camera looks up and down. -Z is the forward base direction. Shade
@@ -6471,12 +6500,12 @@ WHAT IS NOT TOUCHED
 +    f32 y2 =  y * cosf(camPitch) + z * sinf(camPitch);
 +    f32 z2 = -y * sinf(camPitch) + z * cosf(camPitch);
 +    make_vertex(v, idx, (s16) x, (s16) y2, (s16) z2, (s16) u, (s16) tv, 255, 255, 255, 255);
- }
++}
 +#endif
- 
- /**
++
++/**
   * Creates the skybox's display list, then draws the 3x3 grid of tiles.
-@@ -286,7 +319,11 @@
+  */
  Gfx *init_skybox_display_list(s8 player, s8 background, s8 colorIndex) {
      extern Gfx* gBackgroundSkyboxGfx;
  
@@ -6504,17 +6533,22 @@ WHAT IS NOT TOUCHED
          gSPDisplayList(dlist++, dl_skybox_end);
          gSPEndDisplayList(dlist);
      }
-@@ -324,6 +367,113 @@
+@@ -323,7 +366,122 @@
+  *            dl is created
   * @param posX,posY,posZ The camera's position
   * @param focX,focY,focZ The camera's focus.
-  */
++ */
 +#ifdef SM64_VISION_3D
 +/**
 + * Build the VR sky dome: a parametric (ring x azimuth) sphere textured with the
 + * skybox's own panorama tiles, world-locked by baking the game camera's yaw and
 + * pitch into the geometry. Returns NULL if the display-list pool is exhausted,
 + * in which case the caller falls back to the ordinary flat skybox.
-+ */
+  */
++/* The dome built on the last non-interpolated frame, reused across that tick's
++   interpolated frames exactly as gBackgroundSkyboxGfx is for the flat sky. */
++static Gfx *gVrSkyDomeGfx = NULL;
++
 +static Gfx *build_skybox_sphere_vr(s8 player, s8 background, s8 colorIndex) {
 +#define DOME_AZ        16      /* azimuth segments; 8 pinches at the pole */
 +#define DOME_SUBV      3       /* fine sub-rings per panorama row */
@@ -6523,7 +6557,7 @@ WHAT IS NOT TOUCHED
 +    /* 16 fixed commands + 8 per quad — 8 is the same per-tile budget the flat
 +       skybox above proves correct for this exact sequence (env colour, block
 +       texture load, verts, quad DL). */
-+    Gfx *dl = alloc_display_list((16 + NRINGS * DOME_AZ * 8) * sizeof(Gfx));
++    Gfx *dl = alloc_display_list((20 + NRINGS * DOME_AZ * 8) * sizeof(Gfx));
 +    Mtx *ident = alloc_display_list(sizeof(Mtx));
 +    Mtx *persp = alloc_display_list(sizeof(Mtx));
 +    if (dl == NULL || ident == NULL || persp == NULL) { return NULL; }
@@ -6549,6 +6583,16 @@ WHAT IS NOT TOUCHED
 +       already draws, which is the whole point of building it from those tiles.
 +       Bilerp stays: the 32x32 tiles are visibly point-sampled at dome scale. */
 +    gDPSetTextureFilter(g++, G_TF_BILERP);
++    /* Env colour is the level tint and is identical for every quad, so it is set
++       ONCE rather than 384 times (it was per-quad only because the flat path's
++       loop sets it per tile). */
++    {
++        f32 cr = gSkyboxColor[0] / 255.0f;
++        f32 cg = gSkyboxColor[1] / 255.0f;
++        f32 cb = gSkyboxColor[2] / 255.0f;
++        u8 *color = sSkyboxColors[colorIndex];
++        gDPSetEnvColor(g++, color[0] * cr, color[1] * cg, color[2] * cb, 255);
++    }
 +
 +    const f32 R        = 1000.0f;   /* game units; translation-free VP => radius sets clipping only */
 +    const f32 DEG2RAD  = (f32)(M_PI / 180.0f);
@@ -6584,12 +6628,6 @@ WHAT IS NOT TOUCHED
 +                ? gCustomSkyboxPtrList[tileIndex]
 +                : (*(SkyboxTexture *) segmented_to_virtual(sSkyboxTextures[background]))[tileIndex];
 +
-+            f32 cr = gSkyboxColor[0] / 255.0f;
-+            f32 cg = gSkyboxColor[1] / 255.0f;
-+            f32 cb = gSkyboxColor[2] / 255.0f;
-+            u8 *color = sSkyboxColors[colorIndex];
-+            gDPSetEnvColor(g++, color[0] * cr, color[1] * cg, color[2] * cb, 255);
-+
 +            Vtx *v = alloc_display_list(4 * sizeof(Vtx));
 +            if (v == NULL) { continue; }
 +            const f32 az0 = ((f32) col)      / (f32) DOME_AZ * 2.0f * M_PI + camYaw;
@@ -6618,7 +6656,7 @@ WHAT IS NOT TOUCHED
  Gfx *create_skybox_facing_camera(s8 player, s8 background, f32 fov,
                                      f32 posX, f32 posY, f32 posZ,
                                      f32 focX, f32 focY, f32 focZ) {
-@@ -373,5 +523,14 @@
+@@ -373,5 +531,28 @@
      sSkyBoxInfo[player].scaledX = calculate_skybox_scaled_x(player, fov);
      sSkyBoxInfo[player].scaledY = calculate_skybox_scaled_y(player, fov);
  
@@ -6627,8 +6665,22 @@ WHAT IS NOT TOUCHED
 +    // dome stands in for it. Gated on the same predicate as that drop, so the two
 +    // can never disagree and leave the sky either doubled or missing.
 +    if (sm64_vr_sky_dome_active()) {
-+        Gfx *dome = build_skybox_sphere_vr(player, background, colorIndex);
-+        if (dome != NULL) { return dome; }
++        // Mirror the flat path's interpolation contract. patch_mtx_interpolated
++        // re-invokes the background geo node on every interpolated frame, so
++        // building here unconditionally built and THREW AWAY a fresh ~50 KB dome
++        // twice per tick — and it was that inflated texture working set which
++        // pushed the texture cache into the recycling path behind the white-sky
++        // bug. The flat path survives this by patching its cached
++        // gBackgroundSkyboxGfx in place; the dome caches the whole list.
++        //
++        // Note the deliberate absence of a fall-through to the flat skybox on an
++        // interpolated frame: its interpolated branch returns
++        // gBackgroundSkyboxGfx, which under VR is NULL or stale because the flat
++        // path never runs. Returning the cached dome, or nothing, are the only
++        // two correct answers here.
++        if (gRenderingInterpolated) { return gVrSkyDomeGfx; }
++        gVrSkyDomeGfx = build_skybox_sphere_vr(player, background, colorIndex);
++        if (gVrSkyDomeGfx != NULL) { return gVrSkyDomeGfx; }
 +    }
 +#endif
      return init_skybox_display_list(player, background, colorIndex);

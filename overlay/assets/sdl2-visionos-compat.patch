@@ -637,3 +637,37 @@ index 0e0ea05..7f9953d 100644
      }
  
      /* Integer truncation of fractional values matches SDL_uikitmetalview and
+diff --git a/src/joystick/iphoneos/SDL_mfijoystick.m b/src/joystick/iphoneos/SDL_mfijoystick.m
+index 6ff8e0e..d15f051 100644
+--- a/src/joystick/iphoneos/SDL_mfijoystick.m
++++ b/src/joystick/iphoneos/SDL_mfijoystick.m
+@@ -350,6 +350,29 @@ static BOOL ElementAlreadyHandled(SDL_JoystickDeviceItem *device, NSString *elem
+ 
+ static BOOL IOS_AddMFIJoystickDevice(SDL_JoystickDeviceItem *device, GCController *controller)
+ {
++#if TARGET_OS_XR || (defined(__XROS__) && __XROS__)
++    /* visionOS: SPATIAL CONTROLLERS ARE NOT JOYSTICKS (sm64coopdx overlay).
++     *
++     * Once an app declares GCSupportedGameControllers/SpatialGamepad, a PSVR2
++     * Sense pair stops arriving as one aggregated MFi gamepad and arrives as TWO
++     * GCProductCategorySpatialController devices — one per hand. SDL 2.32
++     * predates spatial controllers entirely, so the generic
++     * ENABLE_PHYSICAL_INPUT_PROFILE branch below accepts them anyway
++     * (vendor=Apple, product=4) and maps physicalInputProfile.elements onto
++     * axes/buttons, producing two half-gamepads that fight each other for the
++     * one virtual pad.
++     *
++     * They belong to the native fixed-layout backend (controller_vision.m),
++     * which also needs them un-stolen so it can read their poses. Compared by
++     * STRING rather than against the GCProductCategorySpatialController symbol
++     * so this stays compilable on SDKs that predate it. */
++    if (@available(visionOS 26.0, *)) {
++        NSString *cat = controller.productCategory;
++        if (cat != nil && [cat isEqualToString:@"Spatial Controller"]) {
++            return SDL_FALSE;
++        }
++    }
++#endif
+     Uint16 vendor = 0;
+     Uint16 product = 0;
+     Uint8 subtype = 0;

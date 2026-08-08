@@ -17,6 +17,7 @@
 #include "pc/djui/djui_panel.h"
 #include "pc/djui/djui_panel_menu.h"
 #include "pc/vision3d/sm64_vr_spike.h"
+#include <stdio.h>
 #include "pc/vision3d/sm64_vr_hands.h"  // the hands status line
 
 // Widget mirrors, in menu units.
@@ -103,6 +104,7 @@ static void vr_panel_push(UNUSED struct DjuiBase *caller) {
 }
 
 static char sHandsStatus[64];
+static char sTexStatus[64];
 
 // The hands status row is a readout, not a control.
 static void vr_panel_noop(UNUSED struct DjuiBase *caller) { }
@@ -182,6 +184,15 @@ void djui_panel_vr_create(struct DjuiBase *caller) {
         // Snapshot taken at panel creation, which is when you come looking.
         sm64_vr_hands_status(sHandsStatus, (int) sizeof(sHandsStatus));
         djui_button_create(body, sHandsStatus, DJUI_BUTTON_STYLE_NORMAL, vr_panel_noop);
+        // Texture-cache wraps. Non-zero means the cache is recycling, which is
+        // the condition the white-sky bug needed; zero means the cause is gone
+        // rather than merely masked by the Metal texture-lifetime fix.
+        {
+            extern int sm64_gfx_texture_wraps(void);
+            snprintf(sTexStatus, sizeof(sTexStatus), "Texture cache wraps: %d",
+                     sm64_gfx_texture_wraps());
+            djui_button_create(body, sTexStatus, DJUI_BUTTON_STYLE_NORMAL, vr_panel_noop);
+        }
 
         // Comfort and image.
         djui_slider_create(body, "Stereo Depth", &sUiStereo, 0, 100, vr_panel_push);

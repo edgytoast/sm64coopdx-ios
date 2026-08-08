@@ -1092,7 +1092,27 @@ static void gfx_metal_upload_texture(const uint8_t *rgba32_buf, int width, int h
     if (cur_tex_id[cur_tile] < 0) { return; }
     MetalTexture &t = tex_cache[cur_tex_id[cur_tile]];
 
-    if (t.texture == nil || (int)t.texture.width != width || (int)t.texture.height != height) {
+    // ALWAYS A FRESH TEXTURE, never replaceRegion: into a live one.
+    //
+    // This is the white-sky bug (Fable, 2026-08-08). Metal does not snapshot
+    // texture contents at encode time: writing into an MTLTexture mid-frame
+    // retroactively changes what draws ALREADY ENCODED in the same command
+    // buffer will sample when it finally executes. GL's semantics hid this whole
+    // class of bug; Metal exposes it.
+    //
+    // It only started showing when the VR sky dome widened the texture working
+    // set from the flat skybox's ~9-12 tiles to all 80 every frame, which pushed
+    // gfx_pc's texture cache into its recycling path — and the sky, drawn FIRST,
+    // owns the oldest pool entries, so it is first to be recycled and has the
+    // most subsequently-encoded frame left to overwrite it. The overwriting
+    // content skews white because DJUI's font atlas and panels are white-heavy.
+    // Hence: a sky that goes white, on texture-heavy views, angle-dependently.
+    //
+    // Allocating a new texture and assigning it leaves ARC holding the old one
+    // alive for exactly as long as the encoded frame still references it. Costs
+    // an allocation per texture IMPORT, which is a cache miss — hits never reach
+    // this function at all.
+    {
         MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
                                                                                       width:width
                                                                                      height:height

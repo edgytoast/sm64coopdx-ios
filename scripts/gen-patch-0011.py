@@ -594,6 +594,57 @@ static Gfx *sm64_gfx_build_hands_dl(void) {
 void gfx_start_frame(void) {'''
 t_gfx = replace_once(t_gfx, OLD_FWD, NEW_FWD, "gfx-run-eye-fwd", "static void gfx_run_eye(Gfx *commands);")
 
+# ---------------------------------------------------------------------------
+# 2e. The texture cache's overflow path leaves STALE CHAINS (Fable, 2026-08-08).
+#
+# The white-sky bug's other half. When the pool fills, the "invalidate everything
+# and start over" path resets pool_pos to 0 and nothing else — it does NOT clear
+# the hashmap, so chains built before the wrap still point into the pool. A
+# lookup that misses on a recycled node then follows that node's `next`, which is
+# a pointer from the previous generation, into whatever now lives there. Combined
+# with Metal's live-texture overwrite (fixed in gfx_metal.mm), that is how the
+# sky ends up sampling DJUI's white font atlas.
+#
+# Clearing the HASHMAP alone is the whole fix, and deliberately not
+# gfx_texture_cache_clear's full memset: that would also zero every node's
+# texture_addr, and a node with a NULL addr re-runs gfx_rapi->new_texture(),
+# growing the backend's texture vector on every wrap. Leaving the nodes intact
+# lets them keep and reuse their texture_id, while the chains they were reachable
+# through are gone. Their addr/fmt/siz/next are rewritten as they are reallocated.
+#
+# Also counts wraps, because "does this still happen after the fix" is a question
+# best answered from inside the headset rather than by inference.
+# ---------------------------------------------------------------------------
+OLD_WRAP = """    if (gfx_texture_cache.pool_pos >= sizeof(gfx_texture_cache.pool) / sizeof(struct TextureHashmapNode)) {
+        // Pool is full. We just invalidate everything and start over.
+        gfx_texture_cache.pool_pos = 0;
+        node = &gfx_texture_cache.hashmap[hash];"""
+NEW_WRAP = """    if (gfx_texture_cache.pool_pos >= sizeof(gfx_texture_cache.pool) / sizeof(struct TextureHashmapNode)) {
+        // Pool is full. We just invalidate everything and start over.
+        gfx_texture_cache.pool_pos = 0;
+#ifdef SM64_VISION_3D
+        // The chains MUST go with it, or lookups follow previous-generation
+        // `next` pointers into recycled slots. See overlay 0011 section 2e.
+        memset(gfx_texture_cache.hashmap, 0, sizeof(gfx_texture_cache.hashmap));
+        sm64_gfx_tex_wraps++;
+#endif
+        node = &gfx_texture_cache.hashmap[hash];"""
+t_gfx = replace_once(t_gfx, OLD_WRAP, NEW_WRAP, "tex-cache-wrap-chains",
+                     "sm64_gfx_tex_wraps++")
+
+# The counter itself, next to the other vision3d statics.
+OLD_WRAPCNT = """static int sm64_gfx_sky_layer = 0;"""
+NEW_WRAPCNT = """static int sm64_gfx_sky_layer = 0;
+
+// Texture-cache wraps this session (section 2e). Surfaced in the VR panel: a
+// non-zero value means the cache is recycling, which is the condition the
+// white-sky bug needed. Zero after the fixes means the cause is gone rather
+// than merely masked.
+int sm64_gfx_tex_wraps = 0;
+int sm64_gfx_texture_wraps(void) { return sm64_gfx_tex_wraps; }"""
+t_gfx = replace_once(t_gfx, OLD_WRAPCNT, NEW_WRAPCNT, "tex-wrap-counter",
+                     "sm64_gfx_texture_wraps")
+
 # P1-a: the G_NOOP handler that reads the skybox's background-layer markers.
 # G_NOOP already routes to ext_gfx_run_dl via gfx_run_dl's default case, and ext
 # currently has no case for it (a true no-op), so this is a pure add. The anchor
@@ -987,6 +1038,10 @@ NEW_SKY_DOME = r'''#ifdef SM64_VISION_3D
  * pitch into the geometry. Returns NULL if the display-list pool is exhausted,
  * in which case the caller falls back to the ordinary flat skybox.
  */
+/* The dome built on the last non-interpolated frame, reused across that tick's
+   interpolated frames exactly as gBackgroundSkyboxGfx is for the flat sky. */
+static Gfx *gVrSkyDomeGfx = NULL;
+
 static Gfx *build_skybox_sphere_vr(s8 player, s8 background, s8 colorIndex) {
 #define DOME_AZ        16      /* azimuth segments; 8 pinches at the pole */
 #define DOME_SUBV      3       /* fine sub-rings per panorama row */
@@ -995,7 +1050,7 @@ static Gfx *build_skybox_sphere_vr(s8 player, s8 background, s8 colorIndex) {
     /* 16 fixed commands + 8 per quad — 8 is the same per-tile budget the flat
        skybox above proves correct for this exact sequence (env colour, block
        texture load, verts, quad DL). */
-    Gfx *dl = alloc_display_list((16 + NRINGS * DOME_AZ * 8) * sizeof(Gfx));
+    Gfx *dl = alloc_display_list((20 + NRINGS * DOME_AZ * 8) * sizeof(Gfx));
     Mtx *ident = alloc_display_list(sizeof(Mtx));
     Mtx *persp = alloc_display_list(sizeof(Mtx));
     if (dl == NULL || ident == NULL || persp == NULL) { return NULL; }
@@ -1021,6 +1076,16 @@ static Gfx *build_skybox_sphere_vr(s8 player, s8 background, s8 colorIndex) {
        already draws, which is the whole point of building it from those tiles.
        Bilerp stays: the 32x32 tiles are visibly point-sampled at dome scale. */
     gDPSetTextureFilter(g++, G_TF_BILERP);
+    /* Env colour is the level tint and is identical for every quad, so it is set
+       ONCE rather than 384 times (it was per-quad only because the flat path's
+       loop sets it per tile). */
+    {
+        f32 cr = gSkyboxColor[0] / 255.0f;
+        f32 cg = gSkyboxColor[1] / 255.0f;
+        f32 cb = gSkyboxColor[2] / 255.0f;
+        u8 *color = sSkyboxColors[colorIndex];
+        gDPSetEnvColor(g++, color[0] * cr, color[1] * cg, color[2] * cb, 255);
+    }
 
     const f32 R        = 1000.0f;   /* game units; translation-free VP => radius sets clipping only */
     const f32 DEG2RAD  = (f32)(M_PI / 180.0f);
@@ -1055,12 +1120,6 @@ static Gfx *build_skybox_sphere_vr(s8 player, s8 background, s8 colorIndex) {
             const Texture *tex = (background < 0 || background >= 10)
                 ? gCustomSkyboxPtrList[tileIndex]
                 : (*(SkyboxTexture *) segmented_to_virtual(sSkyboxTextures[background]))[tileIndex];
-
-            f32 cr = gSkyboxColor[0] / 255.0f;
-            f32 cg = gSkyboxColor[1] / 255.0f;
-            f32 cb = gSkyboxColor[2] / 255.0f;
-            u8 *color = sSkyboxColors[colorIndex];
-            gDPSetEnvColor(g++, color[0] * cr, color[1] * cg, color[2] * cb, 255);
 
             Vtx *v = alloc_display_list(4 * sizeof(Vtx));
             if (v == NULL) { continue; }
@@ -1131,8 +1190,22 @@ NEW_SKY_RET = """#ifdef SM64_VISION_3D
     // dome stands in for it. Gated on the same predicate as that drop, so the two
     // can never disagree and leave the sky either doubled or missing.
     if (sm64_vr_sky_dome_active()) {
-        Gfx *dome = build_skybox_sphere_vr(player, background, colorIndex);
-        if (dome != NULL) { return dome; }
+        // Mirror the flat path's interpolation contract. patch_mtx_interpolated
+        // re-invokes the background geo node on every interpolated frame, so
+        // building here unconditionally built and THREW AWAY a fresh ~50 KB dome
+        // twice per tick — and it was that inflated texture working set which
+        // pushed the texture cache into the recycling path behind the white-sky
+        // bug. The flat path survives this by patching its cached
+        // gBackgroundSkyboxGfx in place; the dome caches the whole list.
+        //
+        // Note the deliberate absence of a fall-through to the flat skybox on an
+        // interpolated frame: its interpolated branch returns
+        // gBackgroundSkyboxGfx, which under VR is NULL or stale because the flat
+        // path never runs. Returning the cached dome, or nothing, are the only
+        // two correct answers here.
+        if (gRenderingInterpolated) { return gVrSkyDomeGfx; }
+        gVrSkyDomeGfx = build_skybox_sphere_vr(player, background, colorIndex);
+        if (gVrSkyDomeGfx != NULL) { return gVrSkyDomeGfx; }
     }
 #endif
     return init_skybox_display_list(player, background, colorIndex);

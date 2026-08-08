@@ -38,6 +38,12 @@
 	</dict>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>SM64CoopDX uses the local network to find and connect to co-op games on your Wi-Fi.</string>
+	<!-- Charter R3 / A10: accessory tracking is what gives the Sense controllers
+	     their handedness and (next step) their poses. ARKit gates it behind
+	     ar_authorization_type_accessory_tracking, which needs this key present or
+	     the request is refused without ever asking the user. -->
+	<key>NSAccessoryTrackingUsageDescription</key>
+	<string>SM64CoopDX uses your PSVR2 Sense controllers to play in VR.</string>
 	<key>UIApplicationSupportsIndirectInputEvents</key>
 	<true/>
 	<key>UIFileSharingEnabled</key>

@@ -202,6 +202,9 @@ NEW_FILES = [
     "sm64_vr_gamestate.c",
     # Charter R2: the view modes and their remembered tunables.
     "sm64_vr_presets.c",
+    # Charter R3: PSVR2 Sense controllers as an N64 pad.
+    "controller_vision.h",
+    "controller_vision.m",
 ]
 for name in NEW_FILES:
     src = APP / name
@@ -569,6 +572,34 @@ t_gfx = replace_once(t_gfx, OLD_DIMS, NEW_DIMS, "gfx-start-frame-panel-aspect",
                      "sm64_3d_get_render_target_size(&sm64_vw, &sm64_vh)")
 
 diffs.append(diff_edit(orig_gfx, t_gfx, REL_GFX))
+
+# ---------------------------------------------------------------------------
+# 2g. controller_entry_point.c — register the Sense backend beside SDL.
+#
+# Charter A10, and the donor's own precedent: their VR backend sits beside
+# sdl/touchscreen rather than replacing anything, because both may be connected
+# at once and both feed one pad. Pristine file — no other overlay touches it —
+# and the backend self-gates, so iOS and desktop are unchanged.
+REL_CTRL = "src/pc/controller/controller_entry_point.c"
+orig_ctrl = (VENDOR / REL_CTRL).read_text()
+
+OLD_CTRL_INC = '#include "controller_sdl.h"'
+NEW_CTRL_INC = ('#include "controller_sdl.h"\n'
+                '#include "pc/vision3d/controller_vision.h"')
+t_ctrl = replace_once(orig_ctrl, OLD_CTRL_INC, NEW_CTRL_INC, "ctrl-vision-include",
+                      "pc/vision3d/controller_vision.h")
+
+OLD_CTRL_LIST = """static struct ControllerAPI *controller_implementations[] = {
+    &controller_sdl,"""
+NEW_CTRL_LIST = """static struct ControllerAPI *controller_implementations[] = {
+    &controller_sdl,
+#ifdef SM64_VISION_3D
+    &controller_vision,   // PSVR2 Sense: a FIXED layout, deliberately not bound
+#endif"""
+t_ctrl = replace_once(t_ctrl, OLD_CTRL_LIST, NEW_CTRL_LIST, "ctrl-vision-register",
+                      "&controller_vision")
+
+diffs.append(diff_edit(orig_ctrl, t_ctrl, REL_CTRL))
 
 # ---------------------------------------------------------------------------
 # 2f. star_select.c — stamp the act/star selector for the VR panel routing.

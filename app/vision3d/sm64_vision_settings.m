@@ -102,6 +102,9 @@ static NSString *sm64_value_text(NSString *key, float v) {
     if ([key isEqualToString:@"vrStereo"]) {
         return [NSString stringWithFormat:@"%.0f%% IPD", v * 100.0f];
     }
+    if ([key isEqualToString:@"vrLookSens"]) {
+        return [NSString stringWithFormat:@"%.0f%%", v * 100.0f];
+    }
     if ([key isEqualToString:@"vrMsaa"]) {
         return (v < 1.5f) ? @"Off" : [NSString stringWithFormat:@"%.0fx", v];
     }
@@ -170,7 +173,9 @@ static __weak SM64SettingsVC *g_settingsVC = nil;
         // just exactly replicate each other"). Same store, same rows, either
         // menu — the only difference is where you happen to be standing.
         mkrow(@"VR Mode", @"vrPreset", SM64_ROW_SEG, 0, 2, 0),
-        mkrow(@"Stick Look: Turn Only", @"vrTurnOnly", SM64_ROW_SWITCH, 0, 1, SM64_DEF_VRTURNONLY),
+        mkrow(@"Stick Look", @"vrLookMode", SM64_ROW_SEG, 0, 2, SM64_DEF_VRLOOKMODE),
+        mkrow(@"Look Sensitivity", @"vrLookSens", SM64_ROW_SLIDER, 0.2, 3.0, SM64_DEF_VRLOOKSENS),
+        mkrow(@"Flip Cam (intense)", @"vrFlipCam", SM64_ROW_SWITCH, 0, 1, SM64_DEF_VRFLIPCAM),
         mkrow(@"Antialiasing", @"vrMsaa", SM64_ROW_SLIDER, 1, 8, SM64_DEF_VRMSAA),
         // R0 SPIKE (throwaway). Stereo Strength is a COMFORT lever, not a fix for
         // doubling — 2026-08-07's device round settled that (0% doubled WORSE,
@@ -192,7 +197,6 @@ static __weak SM64SettingsVC *g_settingsVC = nil;
         mkrow(@"Surroundings Dimming", @"vrDim", SM64_ROW_SLIDER, 0.0, 1.0, SM64_DEF_VRDIM),
         mkrow(@"World Lock", @"vrLock", SM64_ROW_SWITCH, 0, 1, SM64_DEF_VRWORLDLOCK),
         mkrow(@"Recenter VR World", @"vrRecenter", SM64_ROW_BUTTON, 0, 0, 0),
-        mkrow(@"Dump Eye Images", @"vrDump", SM64_ROW_BUTTON, 0, 0, 0),
     ] ];
 }
 
@@ -223,7 +227,7 @@ static __weak SM64SettingsVC *g_settingsVC = nil;
 
 - (void)resetVision3D {
     for (NSString *k in @[ @"dist", @"halfW", @"halfH", @"posH", @"sep", @"conv", @"convAuto", @"dim",
-                           @"vrStereo", @"vrScale", @"vrDist", @"vrHeight", @"vrRender", @"vrDim", @"vrLock", @"vrTurnOnly" ]) {
+                           @"vrStereo", @"vrScale", @"vrDist", @"vrHeight", @"vrRender", @"vrDim", @"vrLock", @"vrLookMode", @"vrLookSens", @"vrFlipCam" ]) {
         [NSUserDefaults.standardUserDefaults
             removeObjectForKey:[@"sm64vp3d." stringByAppendingString:k]];
     }
@@ -246,6 +250,7 @@ static __weak SM64SettingsVC *g_settingsVC = nil;
     }
     if (r.type == SM64_ROW_SEG) {
         NSArray *items = @[ @"m", @"ft" ];
+        if ([r.key isEqualToString:@"vrLookMode"]) { items = @[ @"Free", @"Turn", @"Snap" ]; }
         if ([r.key isEqualToString:@"vrPreset"]) {
             NSMutableArray *modes = [NSMutableArray array];
             for (int i = 0; i < sm64_vr_preset_count(); i++) {
@@ -254,7 +259,10 @@ static __weak SM64SettingsVC *g_settingsVC = nil;
             items = modes;
         }
         UISegmentedControl *seg = [[UISegmentedControl alloc] initWithItems:items];
-        seg.selectedSegmentIndex = v > 0.5f ? 1 : 0;
+        // Austin, 2026-08-08: picking First-person worked but the control stayed
+        // on Third-person. This line was the m/ft rule — fine for two segments,
+        // wrong for three, and it silently clamped every mode above the first.
+        seg.selectedSegmentIndex = (items.count > 2) ? (NSInteger)v : (v > 0.5f ? 1 : 0);
         tag_ctl(seg, r);
         [seg addTarget:self action:@selector(segChanged:) forControlEvents:UIControlEventValueChanged];
         c.accessoryView = seg;
@@ -332,14 +340,16 @@ static __weak SM64SettingsVC *g_settingsVC = nil;
     } else if ([r.key isEqualToString:@"vrRecenter"]) {
         sm64_vr_spike_recenter();
         NSLog(@"[vrspike] settings: VR world recenter requested");
-    } else if ([r.key isEqualToString:@"vrDump"]) {
-        sm64_vr_spike_dump_eyes();
-        NSLog(@"[vrspike] settings: eye dump requested");
     }
 }
 
 - (void)segChanged:(UISegmentedControl *)seg {
     SM64Row *r = ctl_row(seg);
+    if ([r.key isEqualToString:@"vrLookMode"]) {
+        sm64_3d_setting_set_f(r.key.UTF8String, (float)seg.selectedSegmentIndex);
+        sm64_3d_apply_settings();
+        return;
+    }
     if ([r.key isEqualToString:@"vrPreset"]) {
         // Switching modes loads that mode's own placement, so the rows below
         // have to be re-read — same reason the in-game panel re-pulls.

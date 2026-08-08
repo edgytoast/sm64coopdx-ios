@@ -596,17 +596,66 @@ t_fpc = replace_once(orig_fpc, OLD_FPC_INC, NEW_FPC_INC, "fpc-vision-include",
                      "pc/vision3d/sm64_vision_3d.h")
 
 OLD_FPC_PITCH = """        // update pitch
-        if (!gFirstPersonCamera.forcePitch) {"""
+        if (!gFirstPersonCamera.forcePitch) {
+            gFirstPersonCamera.pitch -= sensY * (extStickY - 1.5f * mouse_y);
+            gFirstPersonCamera.pitch = clamp(gFirstPersonCamera.pitch, -0x3F00, 0x3F00);
+        }
+
+        // update yaw
+        if (!gFirstPersonCamera.forceYaw) {
+            if (m->controller->buttonDown & L_TRIG && gFirstPersonCamera.centerL) {
+                gFirstPersonCamera.yaw = m->faceAngle[1] + 0x8000;
+            } else {
+                gFirstPersonCamera.yaw += sensX * (extStickX - 1.5f * mouse_x);
+            }
+        }"""
 NEW_FPC_PITCH = """        // update pitch
 #ifdef SM64_VISION_3D
-        // VR first-person: the HEADSET owns pitch. A stick that also pitches
-        // fights it, which was the donor's first public player complaint.
-        extern bool sm64_vr_stick_turn_only(void);
-        if (sm64_vr_stick_turn_only()) { extStickY = 0.0f; mouse_y = 0; }
+        // VR first-person owns this fold. Three things happen here and nowhere
+        // else, which is the donor's rule: the source ships raw signs and each
+        // mode's fold owns its own feel, so touching anything shared would break
+        // third-person's camera instead.
+        //   1. The X sign is INVERTED. First-person and third-person consume the
+        //      same ext_stick with opposite conventions, and in VR first-person
+        //      the stick turned the wrong way (Austin, 2026-08-08).
+        //   2. Look mode: Free pitches with the stick as normal; Turn and Snap
+        //      leave pitch to the headset, which already owns it.
+        //   3. Snap is an instant 45 degrees per flick, re-armed when the stick
+        //      returns to centre — the discrete turn other VR games use.
+        int sm64VrLook = sm64_vr_stick_look_mode();   // -1 when this is not VR first-person
+        if (sm64VrLook >= 0) {
+            extStickX = -extStickX;
+            sensX *= sm64_vr_look_sensitivity();
+            sensY *= sm64_vr_look_sensitivity();
+            if (sm64VrLook != 0) { extStickY = 0.0f; mouse_y = 0; }
+        }
 #endif
-        if (!gFirstPersonCamera.forcePitch) {"""
-t_fpc = replace_once(t_fpc, OLD_FPC_PITCH, NEW_FPC_PITCH, "fpc-yaw-only",
-                     "sm64_vr_stick_turn_only")
+        if (!gFirstPersonCamera.forcePitch) {
+            gFirstPersonCamera.pitch -= sensY * (extStickY - 1.5f * mouse_y);
+            gFirstPersonCamera.pitch = clamp(gFirstPersonCamera.pitch, -0x3F00, 0x3F00);
+        }
+
+        // update yaw
+        if (!gFirstPersonCamera.forceYaw) {
+            if (m->controller->buttonDown & L_TRIG && gFirstPersonCamera.centerL) {
+                gFirstPersonCamera.yaw = m->faceAngle[1] + 0x8000;
+            } else {
+#ifdef SM64_VISION_3D
+            if (sm64VrLook == 2) {
+                static bool sm64VrSnapArmed = true;
+                if (sm64VrSnapArmed && (extStickX > 12.0f || extStickX < -12.0f)) {
+                    gFirstPersonCamera.yaw += (extStickX > 0.0f) ? 0x2000 : -0x2000; // 45 deg
+                    sm64VrSnapArmed = false;
+                } else if (extStickX < 5.0f && extStickX > -5.0f) {
+                    sm64VrSnapArmed = true;
+                }
+            } else
+#endif
+                gFirstPersonCamera.yaw += sensX * (extStickX - 1.5f * mouse_x);
+            }
+        }"""
+t_fpc = replace_once(t_fpc, OLD_FPC_PITCH, NEW_FPC_PITCH, "fpc-vr-look",
+                     "sm64_vr_stick_look_mode")
 
 diffs.append(diff_edit(orig_fpc, t_fpc, REL_FPC))
 

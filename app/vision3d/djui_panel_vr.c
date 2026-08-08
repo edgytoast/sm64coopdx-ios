@@ -28,7 +28,9 @@ static unsigned int sUiDim;      // percent
 static unsigned int sUiMsaa;     // index into sMsaaChoices
 static unsigned int sUiMode;     // view mode (sm64_vr_presets.c)
 static bool sUiWorldLock;
-static bool sUiTurnOnly;   // first-person: stick turns, headset pitches
+static unsigned int sUiLookMode; // 0 Free, 1 Turn, 2 Snap
+static unsigned int sUiLookSens; // percent
+static bool sUiFlipCam;          // somersault the view with Mario
 
 // DJUI sliders are unsigned, and the world can sit BELOW eye level (it usually
 // should — you look down at a diorama), so the height row carries a bias.
@@ -61,7 +63,9 @@ static void vr_panel_pull(void) {
     sUiMsaa      = vr_msaa_index_of((int) sm64_3d_setting_f("vrMsaa", SM64_DEF_VRMSAA));
     sUiWorldLock = sm64_3d_setting_f("vrLock", SM64_DEF_VRWORLDLOCK) > 0.5f;
     sUiMode      = (unsigned int) sm64_vr_preset_get();
-    sUiTurnOnly  = sm64_3d_setting_f("vrTurnOnly", SM64_DEF_VRTURNONLY) > 0.5f;
+    sUiLookMode  = (unsigned int) sm64_3d_setting_f("vrLookMode", SM64_DEF_VRLOOKMODE);
+    sUiLookSens  = (unsigned int) (sm64_3d_setting_f("vrLookSens", SM64_DEF_VRLOOKSENS) * 100.0f);
+    sUiFlipCam   = sm64_3d_setting_f("vrFlipCam", SM64_DEF_VRFLIPCAM) > 0.5f;
 }
 
 // Switching modes restores that mode's own numbers, so the sliders below have to
@@ -82,7 +86,9 @@ static void vr_panel_push(UNUSED struct DjuiBase *caller) {
     sm64_3d_setting_set_f("vrRender", (float) sUiRender / 100.0f);
     sm64_3d_setting_set_f("vrDim", (float) sUiDim / 100.0f);
     sm64_3d_setting_set_f("vrLock", sUiWorldLock ? 1.0f : 0.0f);
-    sm64_3d_setting_set_f("vrTurnOnly", sUiTurnOnly ? 1.0f : 0.0f);
+    sm64_3d_setting_set_f("vrLookMode", (float) sUiLookMode);
+    sm64_3d_setting_set_f("vrLookSens", (float) sUiLookSens / 100.0f);
+    sm64_3d_setting_set_f("vrFlipCam", sUiFlipCam ? 1.0f : 0.0f);
     if (sUiMsaa < (unsigned int) VR_MSAA_COUNT) {
         sm64_3d_setting_set_f("vrMsaa", (float) sMsaaSamples[sUiMsaa]);
     }
@@ -102,7 +108,9 @@ static void vr_panel_reset(UNUSED struct DjuiBase *caller) {
     sm64_3d_setting_set_f("vrDim", SM64_DEF_VRDIM);
     sm64_3d_setting_set_f("vrLock", SM64_DEF_VRWORLDLOCK);
     sm64_3d_setting_set_f("vrMsaa", SM64_DEF_VRMSAA);
-    sm64_3d_setting_set_f("vrTurnOnly", SM64_DEF_VRTURNONLY);
+    sm64_3d_setting_set_f("vrLookMode", SM64_DEF_VRLOOKMODE);
+    sm64_3d_setting_set_f("vrLookSens", SM64_DEF_VRLOOKSENS);
+    sm64_3d_setting_set_f("vrFlipCam", SM64_DEF_VRFLIPCAM);
     vr_panel_pull();
     sm64_3d_apply_settings();
     // No panel rebuild: DJUI sliders read *value when they RENDER
@@ -142,8 +150,14 @@ void djui_panel_vr_create(struct DjuiBase *caller) {
         djui_slider_create(body, "World Distance", &sUiDist, 0, 350, vr_panel_push);
         djui_slider_create(body, "World Height", &sUiHeight, 0, 200, vr_panel_push);
         djui_checkbox_create(body, "World Lock", &sUiWorldLock, vr_panel_push);
-        // First-person only: the headset already owns pitch.
-        djui_checkbox_create(body, "Stick Look: Turn Only", &sUiTurnOnly, vr_panel_push);
+        // First-person look. Turn and Snap both leave pitch to the headset,
+        // which already owns it; Free is the flat-screen behaviour.
+        {
+            char *look[3] = { "Free", "Turn", "Snap" };
+            djui_selectionbox_create(body, "Stick Look", look, 3, &sUiLookMode, vr_panel_push);
+        }
+        djui_slider_create(body, "Look Sensitivity", &sUiLookSens, 20, 300, vr_panel_push);
+        djui_checkbox_create(body, "Flip Cam (intense)", &sUiFlipCam, vr_panel_push);
 
         // Comfort and image.
         djui_slider_create(body, "Stereo Depth", &sUiStereo, 0, 100, vr_panel_push);

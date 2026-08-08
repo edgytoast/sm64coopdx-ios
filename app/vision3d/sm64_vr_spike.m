@@ -174,6 +174,15 @@ static float sVrDim = 1.0f;
 
 void sm64_vr_spike_set_world_lock(int on) { sVrWorldLock = on ? 1 : 0; }
 
+// Flip cam: the angle and its axis arrive TOGETHER, never in two calls — see
+// sm64_vr_update_flip_cam for why that matters.
+static float sVrFlipAngle = 0.0f;
+static int   sVrFlipSide = 0;
+void sm64_vr_set_flip(float radians, bool side) {
+    sVrFlipAngle = radians;
+    sVrFlipSide = side ? 1 : 0;
+}
+
 // PANEL MODE (charter A5). Set from the engine thread every frame; read by both
 // the engine (through the accessors below, which go NULL so the game renders its
 // own flat projection) and this loop (which then draws the frame on a quad
@@ -545,7 +554,24 @@ static void sm64_vr_build_matrices(cp_drawable_t drawable, simd_float4x4 frozenH
                 drawable, cp_axis_direction_convention_right_up_back, src);
         }
         simd_float4x4 P = sm64_vr_forward_z_projection(cpProj, zn, zf);
-        simd_float4x4 M = simd_mul(P, simd_mul(eyeFromOrigin, A));
+
+        // Flip cam rotates the EYE, so it composes between the projection and
+        // the view: a side flip rolls about the view axis, everything else
+        // pitches about the eye's X.
+        simd_float4x4 flipView = eyeFromOrigin;
+        if (sVrFlipAngle != 0.0f) {
+            float c = cosf(sVrFlipAngle), s = sinf(sVrFlipAngle);
+            simd_float4x4 Rf = matrix_identity_float4x4;
+            if (sVrFlipSide) {          // roll about Z
+                Rf.columns[0].x =  c; Rf.columns[0].y =  s;
+                Rf.columns[1].x = -s; Rf.columns[1].y =  c;
+            } else {                    // pitch about X
+                Rf.columns[1].y =  c; Rf.columns[1].z =  s;
+                Rf.columns[2].y = -s; Rf.columns[2].z =  c;
+            }
+            flipView = simd_mul(Rf, flipView);
+        }
+        simd_float4x4 M = simd_mul(P, simd_mul(flipView, A));
         memcpy(&sVrEyeVP[v][0][0], &M, sizeof(sVrEyeVP[v])); // simd column-major == fast3d transpose
 
         // The HUD plane (charter A6). Maps the game's own ortho OUTPUT — which is
@@ -961,7 +987,7 @@ void sm64_vr_spike_run(void *layer_renderer_ptr, int variant) {
             // Eye dump: once automatically after the world has settled, and on
             // demand from the settings button. Done here, where this loop owns a
             // Metal queue and the copies are a known-complete pair.
-            if (sVrWorld && (sVrDumpRequest || frames == 300) && sVrEyeCopy[0] && sVrEyeCopy[1]) {
+            if (sVrWorld && sVrDumpRequest && sVrEyeCopy[0] && sVrEyeCopy[1]) {
                 sVrDumpRequest = 0;
                 sm64_vr_write_png(sVrEyeCopy[0], queue, @"vr-eye-L.png");
                 sm64_vr_write_png(sVrEyeCopy[1], queue, @"vr-eye-R.png");

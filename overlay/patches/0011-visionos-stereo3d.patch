@@ -123,7 +123,7 @@ WHAT IS NOT TOUCHED
 
 --- /dev/null
 +++ b/src/pc/vision3d/sm64_vision_3d.h
-@@ -0,0 +1,242 @@
+@@ -0,0 +1,247 @@
 +#ifndef SM64_VISION_3D_H
 +#define SM64_VISION_3D_H
 +
@@ -253,9 +253,10 @@ WHAT IS NOT TOUCHED
 +// way to kill the edge shimmer there.
 +void gfx_metal_set_msaa(int samples);
 +
-+// Yaw-only stick look in VR first-person (sm64_vr_presets.c), read by
-+// first_person_cam.c at the pitch fold.
-+bool sm64_vr_stick_turn_only(void);
++// VR first-person stick look, read by first_person_cam.c at its own fold.
++// Returns -1 when this is not VR first-person, else 0 Free / 1 Turn / 2 Snap.
++int   sm64_vr_stick_look_mode(void);
++float sm64_vr_look_sensitivity(void);
 +
 +// ---------------------------------------------------------------------------
 +// Panel + loop — implemented in sm64_immersive.m.
@@ -353,9 +354,13 @@ WHAT IS NOT TOUCHED
 +#define SM64_DEF_VRRENDER    0.85f   // eye render size as a fraction of the per-eye view
 +#define SM64_DEF_VRWORLDLOCK 1.0f    // 1 = look around the world; 0 = it follows your head
 +#define SM64_DEF_VRDIM       1.00f   // surroundings dimming; 1.0 = no passthrough
-+#define SM64_DEF_VRTURNONLY  1.0f    // first-person stick TURNS only; the headset owns
-+                                     // pitch, and a stick that also pitches fights it —
-+                                     // the donor's first public player request.
++// First-person stick look: 0 = Free (stick also pitches), 1 = Turn (smooth yaw
++// only — the headset owns pitch, the donor's first public player request),
++// 2 = Snap (instant 45 degrees per flick, the discrete turn other VR games use).
++#define SM64_DEF_VRLOOKMODE  1.0f
++#define SM64_DEF_VRLOOKSENS  1.0f    // multiplier on the stick's turn rate
++#define SM64_DEF_VRFLIPCAM   0.0f    // somersault the view on a flip. Off by default:
++                                     // it is a great trick and it will make you sick.
 +#define SM64_DEF_VRMSAA      2.0f    // VR eye-pass MSAA. 2x by Austin's eye on device
 +                                     // (2026-08-07): "2x is good ... hard to see noticeable
 +                                     // improvement after that", and it is the cheapest rung.
@@ -439,7 +444,7 @@ WHAT IS NOT TOUCHED
 +#endif // SM64_VISION_HOST_H
 --- /dev/null
 +++ b/src/pc/vision3d/sm64_vision_host.m
-@@ -0,0 +1,689 @@
+@@ -0,0 +1,690 @@
 +// sm64_vision_host.m — boots the SDL/coopdx engine under the SwiftUI app entry
 +// (visionOS only) and owns the 2D<->3D transition sequencing.
 +//
@@ -739,6 +744,7 @@ WHAT IS NOT TOUCHED
 +        sm64_vr_poll_hotkeys();     // d-pad up cycles the view mode
 +        sm64_vr_anticlip_resolve(); // level collision keeps the view out of walls
 +        sm64_vr_sync_first_person(); // FP mode drives the game's own FP camera
++        sm64_vr_update_flip_cam();   // somersault the view with Mario, if enabled
 +    }
 +
 +    // R0 SPIKE (throwaway): arm the console bridge on the DEVICE. The bridge is
@@ -2107,7 +2113,7 @@ WHAT IS NOT TOUCHED
 +#endif // SM64_VISION_3D
 --- /dev/null
 +++ b/src/pc/vision3d/sm64_vision_settings.m
-@@ -0,0 +1,390 @@
+@@ -0,0 +1,400 @@
 +// sm64_vision_settings.m — the "Vision Pro 3D" settings table.
 +//
 +// Ported from vkQuake-ios ios/shell/ios_settings.m's "Vision Pro 3D" section,
@@ -2212,6 +2218,9 @@ WHAT IS NOT TOUCHED
 +    if ([key isEqualToString:@"vrStereo"]) {
 +        return [NSString stringWithFormat:@"%.0f%% IPD", v * 100.0f];
 +    }
++    if ([key isEqualToString:@"vrLookSens"]) {
++        return [NSString stringWithFormat:@"%.0f%%", v * 100.0f];
++    }
 +    if ([key isEqualToString:@"vrMsaa"]) {
 +        return (v < 1.5f) ? @"Off" : [NSString stringWithFormat:@"%.0fx", v];
 +    }
@@ -2280,7 +2289,9 @@ WHAT IS NOT TOUCHED
 +        // just exactly replicate each other"). Same store, same rows, either
 +        // menu — the only difference is where you happen to be standing.
 +        mkrow(@"VR Mode", @"vrPreset", SM64_ROW_SEG, 0, 2, 0),
-+        mkrow(@"Stick Look: Turn Only", @"vrTurnOnly", SM64_ROW_SWITCH, 0, 1, SM64_DEF_VRTURNONLY),
++        mkrow(@"Stick Look", @"vrLookMode", SM64_ROW_SEG, 0, 2, SM64_DEF_VRLOOKMODE),
++        mkrow(@"Look Sensitivity", @"vrLookSens", SM64_ROW_SLIDER, 0.2, 3.0, SM64_DEF_VRLOOKSENS),
++        mkrow(@"Flip Cam (intense)", @"vrFlipCam", SM64_ROW_SWITCH, 0, 1, SM64_DEF_VRFLIPCAM),
 +        mkrow(@"Antialiasing", @"vrMsaa", SM64_ROW_SLIDER, 1, 8, SM64_DEF_VRMSAA),
 +        // R0 SPIKE (throwaway). Stereo Strength is a COMFORT lever, not a fix for
 +        // doubling — 2026-08-07's device round settled that (0% doubled WORSE,
@@ -2302,7 +2313,6 @@ WHAT IS NOT TOUCHED
 +        mkrow(@"Surroundings Dimming", @"vrDim", SM64_ROW_SLIDER, 0.0, 1.0, SM64_DEF_VRDIM),
 +        mkrow(@"World Lock", @"vrLock", SM64_ROW_SWITCH, 0, 1, SM64_DEF_VRWORLDLOCK),
 +        mkrow(@"Recenter VR World", @"vrRecenter", SM64_ROW_BUTTON, 0, 0, 0),
-+        mkrow(@"Dump Eye Images", @"vrDump", SM64_ROW_BUTTON, 0, 0, 0),
 +    ] ];
 +}
 +
@@ -2333,7 +2343,7 @@ WHAT IS NOT TOUCHED
 +
 +- (void)resetVision3D {
 +    for (NSString *k in @[ @"dist", @"halfW", @"halfH", @"posH", @"sep", @"conv", @"convAuto", @"dim",
-+                           @"vrStereo", @"vrScale", @"vrDist", @"vrHeight", @"vrRender", @"vrDim", @"vrLock", @"vrTurnOnly" ]) {
++                           @"vrStereo", @"vrScale", @"vrDist", @"vrHeight", @"vrRender", @"vrDim", @"vrLock", @"vrLookMode", @"vrLookSens", @"vrFlipCam" ]) {
 +        [NSUserDefaults.standardUserDefaults
 +            removeObjectForKey:[@"sm64vp3d." stringByAppendingString:k]];
 +    }
@@ -2356,6 +2366,7 @@ WHAT IS NOT TOUCHED
 +    }
 +    if (r.type == SM64_ROW_SEG) {
 +        NSArray *items = @[ @"m", @"ft" ];
++        if ([r.key isEqualToString:@"vrLookMode"]) { items = @[ @"Free", @"Turn", @"Snap" ]; }
 +        if ([r.key isEqualToString:@"vrPreset"]) {
 +            NSMutableArray *modes = [NSMutableArray array];
 +            for (int i = 0; i < sm64_vr_preset_count(); i++) {
@@ -2364,7 +2375,10 @@ WHAT IS NOT TOUCHED
 +            items = modes;
 +        }
 +        UISegmentedControl *seg = [[UISegmentedControl alloc] initWithItems:items];
-+        seg.selectedSegmentIndex = v > 0.5f ? 1 : 0;
++        // Austin, 2026-08-08: picking First-person worked but the control stayed
++        // on Third-person. This line was the m/ft rule — fine for two segments,
++        // wrong for three, and it silently clamped every mode above the first.
++        seg.selectedSegmentIndex = (items.count > 2) ? (NSInteger)v : (v > 0.5f ? 1 : 0);
 +        tag_ctl(seg, r);
 +        [seg addTarget:self action:@selector(segChanged:) forControlEvents:UIControlEventValueChanged];
 +        c.accessoryView = seg;
@@ -2442,14 +2456,16 @@ WHAT IS NOT TOUCHED
 +    } else if ([r.key isEqualToString:@"vrRecenter"]) {
 +        sm64_vr_spike_recenter();
 +        NSLog(@"[vrspike] settings: VR world recenter requested");
-+    } else if ([r.key isEqualToString:@"vrDump"]) {
-+        sm64_vr_spike_dump_eyes();
-+        NSLog(@"[vrspike] settings: eye dump requested");
 +    }
 +}
 +
 +- (void)segChanged:(UISegmentedControl *)seg {
 +    SM64Row *r = ctl_row(seg);
++    if ([r.key isEqualToString:@"vrLookMode"]) {
++        sm64_3d_setting_set_f(r.key.UTF8String, (float)seg.selectedSegmentIndex);
++        sm64_3d_apply_settings();
++        return;
++    }
 +    if ([r.key isEqualToString:@"vrPreset"]) {
 +        // Switching modes loads that mode's own placement, so the rows below
 +        // have to be re-read — same reason the in-game panel re-pulls.
@@ -2888,7 +2904,7 @@ WHAT IS NOT TOUCHED
 +}
 --- /dev/null
 +++ b/src/pc/vision3d/sm64_vr_spike.h
-@@ -0,0 +1,151 @@
+@@ -0,0 +1,157 @@
 +#ifndef SM64_VR_SPIKE_H
 +#define SM64_VR_SPIKE_H
 +
@@ -2999,6 +3015,12 @@ WHAT IS NOT TOUCHED
 +// the re-assert that survives a network reset clearing it underneath us.
 +void sm64_vr_sync_first_person(void);
 +
++// Flip cam: somersault the view with Mario. The angle and the axis it belongs to
++// arrive in ONE call on purpose — split, an eased angle lands on the axis the
++// next move just switched to.
++void sm64_vr_set_flip(float radians, bool side);
++void sm64_vr_update_flip_cam(void);
++
 +// The VR options panel stays in the stereo world so its sliders can be judged
 +// against the thing they change; the menu rides an enlarged HUD plane.
 +void sm64_vr_spike_set_menu_over_world(int on);
@@ -3042,7 +3064,7 @@ WHAT IS NOT TOUCHED
 +#endif // SM64_VR_SPIKE_H
 --- /dev/null
 +++ b/src/pc/vision3d/sm64_vr_spike.m
-@@ -0,0 +1,1142 @@
+@@ -0,0 +1,1168 @@
 +// sm64_vr_spike.m — R0 SPIKE, THROWAWAY. See sm64_vr_spike.h for the question
 +// this exists to answer (VR-CHARTER §5 R0.1 / A7).
 +//
@@ -3218,6 +3240,15 @@ WHAT IS NOT TOUCHED
 +static float sVrDim = 1.0f;
 +
 +void sm64_vr_spike_set_world_lock(int on) { sVrWorldLock = on ? 1 : 0; }
++
++// Flip cam: the angle and its axis arrive TOGETHER, never in two calls — see
++// sm64_vr_update_flip_cam for why that matters.
++static float sVrFlipAngle = 0.0f;
++static int   sVrFlipSide = 0;
++void sm64_vr_set_flip(float radians, bool side) {
++    sVrFlipAngle = radians;
++    sVrFlipSide = side ? 1 : 0;
++}
 +
 +// PANEL MODE (charter A5). Set from the engine thread every frame; read by both
 +// the engine (through the accessors below, which go NULL so the game renders its
@@ -3590,7 +3621,24 @@ WHAT IS NOT TOUCHED
 +                drawable, cp_axis_direction_convention_right_up_back, src);
 +        }
 +        simd_float4x4 P = sm64_vr_forward_z_projection(cpProj, zn, zf);
-+        simd_float4x4 M = simd_mul(P, simd_mul(eyeFromOrigin, A));
++
++        // Flip cam rotates the EYE, so it composes between the projection and
++        // the view: a side flip rolls about the view axis, everything else
++        // pitches about the eye's X.
++        simd_float4x4 flipView = eyeFromOrigin;
++        if (sVrFlipAngle != 0.0f) {
++            float c = cosf(sVrFlipAngle), s = sinf(sVrFlipAngle);
++            simd_float4x4 Rf = matrix_identity_float4x4;
++            if (sVrFlipSide) {          // roll about Z
++                Rf.columns[0].x =  c; Rf.columns[0].y =  s;
++                Rf.columns[1].x = -s; Rf.columns[1].y =  c;
++            } else {                    // pitch about X
++                Rf.columns[1].y =  c; Rf.columns[1].z =  s;
++                Rf.columns[2].y = -s; Rf.columns[2].z =  c;
++            }
++            flipView = simd_mul(Rf, flipView);
++        }
++        simd_float4x4 M = simd_mul(P, simd_mul(flipView, A));
 +        memcpy(&sVrEyeVP[v][0][0], &M, sizeof(sVrEyeVP[v])); // simd column-major == fast3d transpose
 +
 +        // The HUD plane (charter A6). Maps the game's own ortho OUTPUT — which is
@@ -4006,7 +4054,7 @@ WHAT IS NOT TOUCHED
 +            // Eye dump: once automatically after the world has settled, and on
 +            // demand from the settings button. Done here, where this loop owns a
 +            // Metal queue and the copies are a known-complete pair.
-+            if (sVrWorld && (sVrDumpRequest || frames == 300) && sVrEyeCopy[0] && sVrEyeCopy[1]) {
++            if (sVrWorld && sVrDumpRequest && sVrEyeCopy[0] && sVrEyeCopy[1]) {
 +                sVrDumpRequest = 0;
 +                sm64_vr_write_png(sVrEyeCopy[0], queue, @"vr-eye-L.png");
 +                sm64_vr_write_png(sVrEyeCopy[1], queue, @"vr-eye-R.png");
@@ -4220,7 +4268,7 @@ WHAT IS NOT TOUCHED
 +#endif // DJUI_PANEL_VR_H
 --- /dev/null
 +++ b/src/pc/vision3d/djui_panel_vr.c
-@@ -0,0 +1,168 @@
+@@ -0,0 +1,182 @@
 +// djui_panel_vr.c — the in-game VR options panel (Options -> VR).
 +//
 +// See djui_panel_vr.h for why this exists and what belongs here rather than in
@@ -4251,7 +4299,9 @@ WHAT IS NOT TOUCHED
 +static unsigned int sUiMsaa;     // index into sMsaaChoices
 +static unsigned int sUiMode;     // view mode (sm64_vr_presets.c)
 +static bool sUiWorldLock;
-+static bool sUiTurnOnly;   // first-person: stick turns, headset pitches
++static unsigned int sUiLookMode; // 0 Free, 1 Turn, 2 Snap
++static unsigned int sUiLookSens; // percent
++static bool sUiFlipCam;          // somersault the view with Mario
 +
 +// DJUI sliders are unsigned, and the world can sit BELOW eye level (it usually
 +// should — you look down at a diorama), so the height row carries a bias.
@@ -4284,7 +4334,9 @@ WHAT IS NOT TOUCHED
 +    sUiMsaa      = vr_msaa_index_of((int) sm64_3d_setting_f("vrMsaa", SM64_DEF_VRMSAA));
 +    sUiWorldLock = sm64_3d_setting_f("vrLock", SM64_DEF_VRWORLDLOCK) > 0.5f;
 +    sUiMode      = (unsigned int) sm64_vr_preset_get();
-+    sUiTurnOnly  = sm64_3d_setting_f("vrTurnOnly", SM64_DEF_VRTURNONLY) > 0.5f;
++    sUiLookMode  = (unsigned int) sm64_3d_setting_f("vrLookMode", SM64_DEF_VRLOOKMODE);
++    sUiLookSens  = (unsigned int) (sm64_3d_setting_f("vrLookSens", SM64_DEF_VRLOOKSENS) * 100.0f);
++    sUiFlipCam   = sm64_3d_setting_f("vrFlipCam", SM64_DEF_VRFLIPCAM) > 0.5f;
 +}
 +
 +// Switching modes restores that mode's own numbers, so the sliders below have to
@@ -4305,7 +4357,9 @@ WHAT IS NOT TOUCHED
 +    sm64_3d_setting_set_f("vrRender", (float) sUiRender / 100.0f);
 +    sm64_3d_setting_set_f("vrDim", (float) sUiDim / 100.0f);
 +    sm64_3d_setting_set_f("vrLock", sUiWorldLock ? 1.0f : 0.0f);
-+    sm64_3d_setting_set_f("vrTurnOnly", sUiTurnOnly ? 1.0f : 0.0f);
++    sm64_3d_setting_set_f("vrLookMode", (float) sUiLookMode);
++    sm64_3d_setting_set_f("vrLookSens", (float) sUiLookSens / 100.0f);
++    sm64_3d_setting_set_f("vrFlipCam", sUiFlipCam ? 1.0f : 0.0f);
 +    if (sUiMsaa < (unsigned int) VR_MSAA_COUNT) {
 +        sm64_3d_setting_set_f("vrMsaa", (float) sMsaaSamples[sUiMsaa]);
 +    }
@@ -4325,7 +4379,9 @@ WHAT IS NOT TOUCHED
 +    sm64_3d_setting_set_f("vrDim", SM64_DEF_VRDIM);
 +    sm64_3d_setting_set_f("vrLock", SM64_DEF_VRWORLDLOCK);
 +    sm64_3d_setting_set_f("vrMsaa", SM64_DEF_VRMSAA);
-+    sm64_3d_setting_set_f("vrTurnOnly", SM64_DEF_VRTURNONLY);
++    sm64_3d_setting_set_f("vrLookMode", SM64_DEF_VRLOOKMODE);
++    sm64_3d_setting_set_f("vrLookSens", SM64_DEF_VRLOOKSENS);
++    sm64_3d_setting_set_f("vrFlipCam", SM64_DEF_VRFLIPCAM);
 +    vr_panel_pull();
 +    sm64_3d_apply_settings();
 +    // No panel rebuild: DJUI sliders read *value when they RENDER
@@ -4365,8 +4421,14 @@ WHAT IS NOT TOUCHED
 +        djui_slider_create(body, "World Distance", &sUiDist, 0, 350, vr_panel_push);
 +        djui_slider_create(body, "World Height", &sUiHeight, 0, 200, vr_panel_push);
 +        djui_checkbox_create(body, "World Lock", &sUiWorldLock, vr_panel_push);
-+        // First-person only: the headset already owns pitch.
-+        djui_checkbox_create(body, "Stick Look: Turn Only", &sUiTurnOnly, vr_panel_push);
++        // First-person look. Turn and Snap both leave pitch to the headset,
++        // which already owns it; Free is the flat-screen behaviour.
++        {
++            char *look[3] = { "Free", "Turn", "Snap" };
++            djui_selectionbox_create(body, "Stick Look", look, 3, &sUiLookMode, vr_panel_push);
++        }
++        djui_slider_create(body, "Look Sensitivity", &sUiLookSens, 20, 300, vr_panel_push);
++        djui_checkbox_create(body, "Flip Cam (intense)", &sUiFlipCam, vr_panel_push);
 +
 +        // Comfort and image.
 +        djui_slider_create(body, "Stereo Depth", &sUiStereo, 0, 100, vr_panel_push);
@@ -4391,7 +4453,7 @@ WHAT IS NOT TOUCHED
 +#endif // SM64_VISION_3D
 --- /dev/null
 +++ b/src/pc/vision3d/sm64_vr_gamestate.c
-@@ -0,0 +1,235 @@
+@@ -0,0 +1,274 @@
 +// sm64_vr_gamestate.c — "is this frame a menu?", answered from the game's own
 +// state machine (charter A5, ported from the donor's vr_frame_is_nongameplay,
 +// pc_main.c:274-305).
@@ -4435,6 +4497,7 @@ WHAT IS NOT TOUCHED
 +#include "pc/djui/djui_chat_box.h"  // the menu-button long press
 +#include "pc/network/network.h"     // gNetworkType: chat is networked-only
 +#include "game/first_person_cam.h" // the game's own first-person camera
++#include "sm64.h"                 // ACT_TRIPLE_JUMP / ACT_BACKFLIP / ACT_SIDE_FLIP
 +#include <math.h>
 +#include "pc/utils/misc.h"       // clock_elapsed_f64
 +#include <string.h>
@@ -4486,6 +4549,44 @@ WHAT IS NOT TOUCHED
 +    } else if (want && !gFirstPersonCamera.enabled) {
 +        set_first_person_enabled(true);
 +    }
++}
++
++// FLIP CAM (charter R4). When Mario somersaults, the view somersaults with him.
++// Off by default and it should stay that way for most people — it is a great
++// trick that will make you ill over a session — but it is the kind of thing VR
++// exists for, so it is a switch rather than an absence.
++//
++// The angle and the AXIS it belongs to are set together, never in two calls.
++// That is the donor's hardest-won lesson here: the tilt eases over several
++// frames while the axis is read from Mario's CURRENT action and switches in one,
++// so split calls hand a decaying roll to the pitch axis mid-decay and the view
++// twists onto an axis it was never leaning on.
++void sm64_vr_update_flip_cam(void) {
++    static float angle = 0.0f;
++    static bool  side = false;
++
++    struct MarioState *m = &gMarioStates[0];
++    bool on = sm64_vr_first_person_active()
++           && sm64_3d_setting_f("vrFlipCam", SM64_DEF_VRFLIPCAM) > 0.5f;
++    if (!on || m == NULL) {
++        if (angle != 0.0f) { angle = 0.0f; sm64_vr_set_flip(0.0f, false); }
++        return;
++    }
++
++    u32 a = m->action;
++    bool flipping = (a == ACT_TRIPLE_JUMP) || (a == ACT_BACKFLIP) || (a == ACT_SIDE_FLIP);
++    if (flipping) {
++        // One full turn over roughly the length of the move. Read the axis in the
++        // SAME frame as the angle, and hand both over together (below).
++        side = (a == ACT_SIDE_FLIP);
++        float dir = (a == ACT_BACKFLIP) ? 1.0f : -1.0f;
++        angle += dir * (2.0f * 3.14159265f / 18.0f);   // ~18 sim ticks = ~0.6 s
++    } else if (angle != 0.0f) {
++        // Ease back rather than snapping: landing should not jolt the view.
++        angle *= 0.80f;
++        if (angle < 0.02f && angle > -0.02f) { angle = 0.0f; }
++    }
++    sm64_vr_set_flip(angle, side);
 +}
 +
 +// D-pad UP cycles the view mode, so switching does not mean opening a menu
@@ -4629,7 +4730,7 @@ WHAT IS NOT TOUCHED
 +#endif // SM64_VISION_3D
 --- /dev/null
 +++ b/src/pc/vision3d/sm64_vr_presets.c
-@@ -0,0 +1,138 @@
+@@ -0,0 +1,144 @@
 +// sm64_vr_presets.c — VR view modes (charter R2, donor vr.c:1493-1556).
 +//
 +// A "mode" is just a remembered set of placement numbers, and the donor's design
@@ -4746,11 +4847,17 @@ WHAT IS NOT TOUCHED
 +    return sPresets[sm64_vr_preset_get()].firstPerson;
 +}
 +
-+// Yaw-only stick look. True only in VR first-person AND when the setting is on
-+// (default on, charter R4). Read from first_person_cam.c at the pitch fold.
-+bool sm64_vr_stick_turn_only(void) {
-+    return sm64_vr_first_person_active()
-+        && sm64_3d_setting_f("vrTurnOnly", SM64_DEF_VRTURNONLY) > 0.5f;
++// Stick look in VR first-person. -1 means "not VR first-person", so the fold in
++// first_person_cam.c leaves every non-VR path exactly as it was.
++int sm64_vr_stick_look_mode(void) {
++    if (!sm64_vr_first_person_active()) { return -1; }
++    int m = (int) sm64_3d_setting_f("vrLookMode", SM64_DEF_VRLOOKMODE);
++    return (m < 0 || m > 2) ? 1 : m;
++}
++
++float sm64_vr_look_sensitivity(void) {
++    float s = sm64_3d_setting_f("vrLookSens", SM64_DEF_VRLOOKSENS);
++    return (s < 0.1f) ? 0.1f : (s > 3.0f ? 3.0f : s);
 +}
 +
 +void sm64_vr_preset_cycle(void) {
@@ -5440,19 +5547,51 @@ WHAT IS NOT TOUCHED
  
  #include "sm64.h"
  #include "behavior_data.h"
-@@ -76,6 +77,12 @@
+@@ -76,6 +77,26 @@
          }
  
          // update pitch
 +#ifdef SM64_VISION_3D
-+        // VR first-person: the HEADSET owns pitch. A stick that also pitches
-+        // fights it, which was the donor's first public player complaint.
-+        extern bool sm64_vr_stick_turn_only(void);
-+        if (sm64_vr_stick_turn_only()) { extStickY = 0.0f; mouse_y = 0; }
++        // VR first-person owns this fold. Three things happen here and nowhere
++        // else, which is the donor's rule: the source ships raw signs and each
++        // mode's fold owns its own feel, so touching anything shared would break
++        // third-person's camera instead.
++        //   1. The X sign is INVERTED. First-person and third-person consume the
++        //      same ext_stick with opposite conventions, and in VR first-person
++        //      the stick turned the wrong way (Austin, 2026-08-08).
++        //   2. Look mode: Free pitches with the stick as normal; Turn and Snap
++        //      leave pitch to the headset, which already owns it.
++        //   3. Snap is an instant 45 degrees per flick, re-armed when the stick
++        //      returns to centre — the discrete turn other VR games use.
++        int sm64VrLook = sm64_vr_stick_look_mode();   // -1 when this is not VR first-person
++        if (sm64VrLook >= 0) {
++            extStickX = -extStickX;
++            sensX *= sm64_vr_look_sensitivity();
++            sensY *= sm64_vr_look_sensitivity();
++            if (sm64VrLook != 0) { extStickY = 0.0f; mouse_y = 0; }
++        }
 +#endif
          if (!gFirstPersonCamera.forcePitch) {
              gFirstPersonCamera.pitch -= sensY * (extStickY - 1.5f * mouse_y);
              gFirstPersonCamera.pitch = clamp(gFirstPersonCamera.pitch, -0x3F00, 0x3F00);
+@@ -86,6 +107,17 @@
+             if (m->controller->buttonDown & L_TRIG && gFirstPersonCamera.centerL) {
+                 gFirstPersonCamera.yaw = m->faceAngle[1] + 0x8000;
+             } else {
++#ifdef SM64_VISION_3D
++            if (sm64VrLook == 2) {
++                static bool sm64VrSnapArmed = true;
++                if (sm64VrSnapArmed && (extStickX > 12.0f || extStickX < -12.0f)) {
++                    gFirstPersonCamera.yaw += (extStickX > 0.0f) ? 0x2000 : -0x2000; // 45 deg
++                    sm64VrSnapArmed = false;
++                } else if (extStickX < 5.0f && extStickX > -5.0f) {
++                    sm64VrSnapArmed = true;
++                }
++            } else
++#endif
+                 gFirstPersonCamera.yaw += sensX * (extStickX - 1.5f * mouse_x);
+             }
+         }
 --- a/src/pc/controller/controller_entry_point.c
 +++ b/src/pc/controller/controller_entry_point.c
 @@ -7,6 +7,7 @@

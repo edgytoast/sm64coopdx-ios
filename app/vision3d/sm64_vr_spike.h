@@ -108,6 +108,12 @@ void sm64_vr_poll_hotkeys(void);
 // the re-assert that survives a network reset clearing it underneath us.
 void sm64_vr_sync_first_person(void);
 
+// Flip cam: somersault the view with Mario. The angle and the axis it belongs to
+// arrive in ONE call on purpose — split, an eased angle lands on the axis the
+// next move just switched to.
+void sm64_vr_set_flip(float radians, bool side);
+void sm64_vr_update_flip_cam(void);
+
 // The VR options panel stays in the stereo world so its sliders can be judged
 // against the thing they change; the menu rides an enlarged HUD plane.
 void sm64_vr_spike_set_menu_over_world(int on);

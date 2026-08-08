@@ -41,6 +41,7 @@
 #include "pc/djui/djui_chat_box.h"  // the menu-button long press
 #include "pc/network/network.h"     // gNetworkType: chat is networked-only
 #include "game/first_person_cam.h" // the game's own first-person camera
+#include "sm64.h"                 // ACT_TRIPLE_JUMP / ACT_BACKFLIP / ACT_SIDE_FLIP
 #include <math.h>
 #include "pc/utils/misc.h"       // clock_elapsed_f64
 #include <string.h>
@@ -92,6 +93,44 @@ void sm64_vr_sync_first_person(void) {
     } else if (want && !gFirstPersonCamera.enabled) {
         set_first_person_enabled(true);
     }
+}
+
+// FLIP CAM (charter R4). When Mario somersaults, the view somersaults with him.
+// Off by default and it should stay that way for most people — it is a great
+// trick that will make you ill over a session — but it is the kind of thing VR
+// exists for, so it is a switch rather than an absence.
+//
+// The angle and the AXIS it belongs to are set together, never in two calls.
+// That is the donor's hardest-won lesson here: the tilt eases over several
+// frames while the axis is read from Mario's CURRENT action and switches in one,
+// so split calls hand a decaying roll to the pitch axis mid-decay and the view
+// twists onto an axis it was never leaning on.
+void sm64_vr_update_flip_cam(void) {
+    static float angle = 0.0f;
+    static bool  side = false;
+
+    struct MarioState *m = &gMarioStates[0];
+    bool on = sm64_vr_first_person_active()
+           && sm64_3d_setting_f("vrFlipCam", SM64_DEF_VRFLIPCAM) > 0.5f;
+    if (!on || m == NULL) {
+        if (angle != 0.0f) { angle = 0.0f; sm64_vr_set_flip(0.0f, false); }
+        return;
+    }
+
+    u32 a = m->action;
+    bool flipping = (a == ACT_TRIPLE_JUMP) || (a == ACT_BACKFLIP) || (a == ACT_SIDE_FLIP);
+    if (flipping) {
+        // One full turn over roughly the length of the move. Read the axis in the
+        // SAME frame as the angle, and hand both over together (below).
+        side = (a == ACT_SIDE_FLIP);
+        float dir = (a == ACT_BACKFLIP) ? 1.0f : -1.0f;
+        angle += dir * (2.0f * 3.14159265f / 18.0f);   // ~18 sim ticks = ~0.6 s
+    } else if (angle != 0.0f) {
+        // Ease back rather than snapping: landing should not jolt the view.
+        angle *= 0.80f;
+        if (angle < 0.02f && angle > -0.02f) { angle = 0.0f; }
+    }
+    sm64_vr_set_flip(angle, side);
 }
 
 // D-pad UP cycles the view mode, so switching does not mean opening a menu

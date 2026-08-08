@@ -114,11 +114,17 @@ bool sm64_vr_first_person_active(void) {
     return sPresets[sm64_vr_preset_get()].firstPerson;
 }
 
-// Yaw-only stick look. True only in VR first-person AND when the setting is on
-// (default on, charter R4). Read from first_person_cam.c at the pitch fold.
-bool sm64_vr_stick_turn_only(void) {
-    return sm64_vr_first_person_active()
-        && sm64_3d_setting_f("vrTurnOnly", SM64_DEF_VRTURNONLY) > 0.5f;
+// Stick look in VR first-person. -1 means "not VR first-person", so the fold in
+// first_person_cam.c leaves every non-VR path exactly as it was.
+int sm64_vr_stick_look_mode(void) {
+    if (!sm64_vr_first_person_active()) { return -1; }
+    int m = (int) sm64_3d_setting_f("vrLookMode", SM64_DEF_VRLOOKMODE);
+    return (m < 0 || m > 2) ? 1 : m;
+}
+
+float sm64_vr_look_sensitivity(void) {
+    float s = sm64_3d_setting_f("vrLookSens", SM64_DEF_VRLOOKSENS);
+    return (s < 0.1f) ? 0.1f : (s > 3.0f ? 3.0f : s);
 }
 
 void sm64_vr_preset_cycle(void) {

@@ -29,16 +29,13 @@ int sm64_vr_hands_active(void);
 // entirely in EyeVP — so one display list serves both.
 int sm64_vr_hand_matrix(int hand, float out[4][4]);
 
-// Setting: "Show Mario Hands". Off means the poll still runs (so the log still
-// tells us whether poses exist) but nothing is drawn.
-void sm64_vr_hands_set_enabled(int on);
-int  sm64_vr_hands_get_enabled(void);
-
-// Hand size, as a multiplier on Mario's own hand geometry. 1.0 is Mario-sized,
-// which is life-sized in first-person because that is what the FP world scale
-// means. Exposed because "Mario-sized" and "your-hand-sized" are only the same
-// thing if the world scale is exactly right.
-void  sm64_vr_hands_set_scale(float s);
+// The "Show Mario Hands" toggle and the hand-size multiplier, both read from the
+// shared settings store (vrHands / vrHandSize) so the visionOS sheet and the
+// in-game DJUI panel drive one value. Read-only here: writes go through
+// sm64_3d_setting_set_f like every other VR setting. Turning hands off still
+// leaves the pose poll running, so the log keeps answering whether the hardware
+// can be tracked at all.
+int   sm64_vr_hands_get_enabled(void);
 float sm64_vr_hands_get_scale(void);
 
 #endif // SM64_VR_HANDS_H

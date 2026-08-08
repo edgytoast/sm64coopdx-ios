@@ -31,6 +31,8 @@ static bool sUiWorldLock;
 static unsigned int sUiLookMode; // 0 Free, 1 Turn, 2 Snap
 static unsigned int sUiLookSens; // percent
 static bool sUiFlipCam;          // somersault the view with Mario
+static bool sUiHands;            // draw Mario's hands on your controllers
+static unsigned int sUiHandSize; // percent of Mario's own hand geometry
 
 // DJUI sliders are unsigned, and the world can sit BELOW eye level (it usually
 // should — you look down at a diorama), so the height row carries a bias.
@@ -66,6 +68,8 @@ static void vr_panel_pull(void) {
     sUiLookMode  = (unsigned int) sm64_3d_setting_f("vrLookMode", SM64_DEF_VRLOOKMODE);
     sUiLookSens  = (unsigned int) (sm64_3d_setting_f("vrLookSens", SM64_DEF_VRLOOKSENS) * 100.0f);
     sUiFlipCam   = sm64_3d_setting_f("vrFlipCam", SM64_DEF_VRFLIPCAM) > 0.5f;
+    sUiHands     = sm64_3d_setting_f("vrHands", SM64_DEF_VRHANDS) > 0.5f;
+    sUiHandSize  = (unsigned int) (sm64_3d_setting_f("vrHandSize", SM64_DEF_VRHANDSIZE) * 100.0f);
 }
 
 // Switching modes restores that mode's own numbers, so the sliders below have to
@@ -89,6 +93,8 @@ static void vr_panel_push(UNUSED struct DjuiBase *caller) {
     sm64_3d_setting_set_f("vrLookMode", (float) sUiLookMode);
     sm64_3d_setting_set_f("vrLookSens", (float) sUiLookSens / 100.0f);
     sm64_3d_setting_set_f("vrFlipCam", sUiFlipCam ? 1.0f : 0.0f);
+    sm64_3d_setting_set_f("vrHands", sUiHands ? 1.0f : 0.0f);
+    sm64_3d_setting_set_f("vrHandSize", (float) sUiHandSize / 100.0f);
     if (sUiMsaa < (unsigned int) VR_MSAA_COUNT) {
         sm64_3d_setting_set_f("vrMsaa", (float) sMsaaSamples[sUiMsaa]);
     }
@@ -111,6 +117,8 @@ static void vr_panel_reset(UNUSED struct DjuiBase *caller) {
     sm64_3d_setting_set_f("vrLookMode", SM64_DEF_VRLOOKMODE);
     sm64_3d_setting_set_f("vrLookSens", SM64_DEF_VRLOOKSENS);
     sm64_3d_setting_set_f("vrFlipCam", SM64_DEF_VRFLIPCAM);
+    sm64_3d_setting_set_f("vrHands", SM64_DEF_VRHANDS);
+    sm64_3d_setting_set_f("vrHandSize", SM64_DEF_VRHANDSIZE);
     vr_panel_pull();
     sm64_3d_apply_settings();
     // No panel rebuild: DJUI sliders read *value when they RENDER
@@ -158,6 +166,11 @@ void djui_panel_vr_create(struct DjuiBase *caller) {
         }
         djui_slider_create(body, "Look Sensitivity", &sUiLookSens, 20, 300, vr_panel_push);
         djui_checkbox_create(body, "Flip Cam (intense)", &sUiFlipCam, vr_panel_push);
+        // Charter R4. Drawn only in first-person, and only while a controller is
+        // actually pose-tracked — see sm64_vr_hands.m for why that is an open
+        // question on this hardware rather than a given.
+        djui_checkbox_create(body, "Show Mario Hands", &sUiHands, vr_panel_push);
+        djui_slider_create(body, "Hand Size", &sUiHandSize, 30, 300, vr_panel_push);
 
         // Comfort and image.
         djui_slider_create(body, "Stereo Depth", &sUiStereo, 0, 100, vr_panel_push);

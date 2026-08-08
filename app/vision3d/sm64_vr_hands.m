@@ -66,8 +66,17 @@ static bool sProviderDirty = false;     // the accessory set changed; rebuild
 
 static simd_float4x4 sHandWorld[2];     // origin_from_anchor, metres
 static volatile int  sHandValid[2] = { 0, 0 };
-static int           sHandsEnabled = 1;
-static float         sHandScale = 1.0f;
+
+// The toggle and the size live in the SHARED settings store, not in statics
+// here, so the visionOS sheet and the in-game DJUI panel drive one value —
+// the same one-store rule the rest of the VR settings follow.
+static int sm64_vr_hands_enabled(void) {
+    return sm64_3d_setting_f("vrHands", SM64_DEF_VRHANDS) > 0.5f;
+}
+static float sm64_vr_hands_scale(void) {
+    float s = sm64_3d_setting_f("vrHandSize", SM64_DEF_VRHANDSIZE);
+    return (s >= 0.1f && s <= 10.0f) ? s : SM64_DEF_VRHANDSIZE;
+}
 
 // Diagnostics: this is a feature whose first question is "does the hardware do
 // this at all", so the log is the deliverable of the first device round.
@@ -227,13 +236,13 @@ void sm64_vr_hands_poll(void) {
 // Query
 // ---------------------------------------------------------------------------
 int sm64_vr_hands_active(void) {
-    if (!sHandsEnabled) { return 0; }
+    if (!sm64_vr_hands_enabled()) { return 0; }
     if (!sm64_vr_first_person_active()) { return 0; }  // your hands belong where your body is
     return (sHandValid[0] || sHandValid[1]) ? 1 : 0;
 }
 
 int sm64_vr_hand_matrix(int hand, float out[4][4]) {
-    if (hand < 0 || hand > 1 || !sHandValid[hand] || !sHandsEnabled) { return 0; }
+    if (hand < 0 || hand > 1 || !sHandValid[hand] || !sm64_vr_hands_enabled()) { return 0; }
 
     float camFromWorld[16];
     if (!sm64_vr_camera_from_world(camFromWorld)) { return 0; }
@@ -247,9 +256,10 @@ int sm64_vr_hand_matrix(int hand, float out[4][4]) {
     // the only scaling wanted is the taste knob. Applied on the right so it
     // scales the model about its own origin rather than sliding it along the
     // camera axes.
-    if (sHandScale != 1.0f) {
+    const float handScale = sm64_vr_hands_scale();
+    if (handScale != 1.0f) {
         simd_float4x4 S = matrix_identity_float4x4;
-        S.columns[0].x = S.columns[1].y = S.columns[2].z = sHandScale;
+        S.columns[0].x = S.columns[1].y = S.columns[2].z = handScale;
         M = simd_mul(M, S);
     }
 
@@ -259,9 +269,7 @@ int sm64_vr_hand_matrix(int hand, float out[4][4]) {
     return 1;
 }
 
-void  sm64_vr_hands_set_enabled(int on) { sHandsEnabled = on ? 1 : 0; }
-int   sm64_vr_hands_get_enabled(void)   { return sHandsEnabled; }
-void  sm64_vr_hands_set_scale(float s)  { if (s >= 0.1f && s <= 10.0f) { sHandScale = s; } }
-float sm64_vr_hands_get_scale(void)     { return sHandScale; }
+int   sm64_vr_hands_get_enabled(void) { return sm64_vr_hands_enabled(); }
+float sm64_vr_hands_get_scale(void)   { return sm64_vr_hands_scale(); }
 
 #endif // SM64_VISION_3D

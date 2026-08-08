@@ -248,6 +248,12 @@ void sm64_3d_apply_settings(void);
 #define SM64_DEF_VRLOOKSENS  1.0f    // multiplier on the stick's turn rate
 #define SM64_DEF_VRFLIPCAM   0.0f    // somersault the view on a flip. Off by default:
                                      // it is a great trick and it will make you sick.
+// Mario's hands on your controllers (charter R4). ON by default, but it draws
+// only in first-person AND only when a controller is actually pose-tracked, so
+// on hardware that turns out not to be trackable this costs a flag test and
+// changes nothing on screen.
+#define SM64_DEF_VRHANDS     1.0f
+#define SM64_DEF_VRHANDSIZE  1.0f    // multiplier on Mario's own hand geometry
 #define SM64_DEF_VRMSAA      2.0f    // VR eye-pass MSAA. 2x by Austin's eye on device
                                      // (2026-08-07): "2x is good ... hard to see noticeable
                                      // improvement after that", and it is the cheapest rung.

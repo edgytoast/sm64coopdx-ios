@@ -176,6 +176,11 @@ static __weak SM64SettingsVC *g_settingsVC = nil;
         mkrow(@"Stick Look", @"vrLookMode", SM64_ROW_SEG, 0, 2, SM64_DEF_VRLOOKMODE),
         mkrow(@"Look Sensitivity", @"vrLookSens", SM64_ROW_SLIDER, 0.2, 3.0, SM64_DEF_VRLOOKSENS),
         mkrow(@"Flip Cam (intense)", @"vrFlipCam", SM64_ROW_SWITCH, 0, 1, SM64_DEF_VRFLIPCAM),
+        // Charter R4. Draws only in first-person and only while a controller is
+        // actually pose-tracked, so on hardware that cannot be tracked this row
+        // does nothing visible — which is itself the answer worth having.
+        mkrow(@"Show Mario Hands", @"vrHands", SM64_ROW_SWITCH, 0, 1, SM64_DEF_VRHANDS),
+        mkrow(@"Hand Size", @"vrHandSize", SM64_ROW_SLIDER, 0.3, 3.0, SM64_DEF_VRHANDSIZE),
         mkrow(@"Antialiasing", @"vrMsaa", SM64_ROW_SLIDER, 1, 8, SM64_DEF_VRMSAA),
         // R0 SPIKE (throwaway). Stereo Strength is a COMFORT lever, not a fix for
         // doubling — 2026-08-07's device round settled that (0% doubled WORSE,
@@ -227,7 +232,8 @@ static __weak SM64SettingsVC *g_settingsVC = nil;
 
 - (void)resetVision3D {
     for (NSString *k in @[ @"dist", @"halfW", @"halfH", @"posH", @"sep", @"conv", @"convAuto", @"dim",
-                           @"vrStereo", @"vrScale", @"vrDist", @"vrHeight", @"vrRender", @"vrDim", @"vrLock", @"vrLookMode", @"vrLookSens", @"vrFlipCam" ]) {
+                           @"vrStereo", @"vrScale", @"vrDist", @"vrHeight", @"vrRender", @"vrDim", @"vrLock", @"vrLookMode", @"vrLookSens", @"vrFlipCam",
+                           @"vrHands", @"vrHandSize" ]) {
         [NSUserDefaults.standardUserDefaults
             removeObjectForKey:[@"sm64vp3d." stringByAppendingString:k]];
     }

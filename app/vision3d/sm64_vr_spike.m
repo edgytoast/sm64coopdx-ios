@@ -105,6 +105,7 @@ float sm64_vr_anticlip_world_scale(void) { return sVrScale; }
 
 static float sVrEyeVP[2][4][4];
 static float sVrHudVP[2][4][4];
+static float sVrSkyVP[2][4][4];        // EyeVP with the translation column zeroed
 static volatile int sVrValid = 0;      // read by the ENGINE thread
 static int sVrWorld = 0;               // world mode on (vs the clear-only probe)
 
@@ -234,7 +235,23 @@ const float *sm64_vr_hud_matrix(int eye) {
     return &sVrHudVP[eye - 1][0][0];
 }
 
+// The sky dome's own view-projection: the eye's rotation with NO translation,
+// so the sphere is centred on the eye and both eyes see it identically. That is
+// what makes it read as SKY rather than as a painted ball — see the marker
+// comment in sm64_vision_3d.h. Same validity gate as the eye matrix, so a panel
+// fallback frame silently returns to the ordinary flat skybox.
+const float *sm64_vr_sky_viewproj(int eye) {
+    if (!sVrValid || sVrPanelMode || eye < 1 || eye > 2) { return NULL; }
+    return &sVrSkyVP[eye - 1][0][0];
+}
+
 int sm64_vr_hide_background(void) { return sVrWorld && !sVrPanelMode; }
+
+// Whether skybox.c should build the 3D dome INSTEAD of the flat ortho skybox.
+// Deliberately the same predicate as hide_background: those two are the two
+// halves of one decision (drop the flat image, draw the sphere), and letting
+// them disagree is how you get either two skies or none.
+int sm64_vr_sky_dome_active(void) { return sVrWorld && !sVrPanelMode; }
 
 // The compositor's own projection with ONLY its depth row replaced.
 //
@@ -571,8 +588,21 @@ static void sm64_vr_build_matrices(cp_drawable_t drawable, simd_float4x4 frozenH
             }
             flipView = simd_mul(Rf, flipView);
         }
-        simd_float4x4 M = simd_mul(P, simd_mul(flipView, A));
+        simd_float4x4 VA = simd_mul(flipView, A);
+        simd_float4x4 M = simd_mul(P, VA);
         memcpy(&sVrEyeVP[v][0][0], &M, sizeof(sVrEyeVP[v])); // simd column-major == fast3d transpose
+
+        // The SKY DOME's matrix: identical, minus the translation. Zeroing the
+        // translation column leaves the rotation AND the world scale intact, so
+        // the dome keeps turning correctly with the head and the placement while
+        // sitting centred on the eye — zero parallax, sky at infinity, and the
+        // radius free to be whatever survives the near/far planes. The scale
+        // matters only for clipping: at R=1000 game units the dome is
+        // 1000/sVrScale metres out, comfortably inside zf in every preset.
+        simd_float4x4 skyVA = VA;
+        skyVA.columns[3] = simd_make_float4(0.0f, 0.0f, 0.0f, 1.0f);
+        simd_float4x4 Msky = simd_mul(P, skyVA);
+        memcpy(&sVrSkyVP[v][0][0], &Msky, sizeof(sVrSkyVP[v]));
 
         // The HUD plane (charter A6). Maps the game's own ortho OUTPUT — which is
         // already NDC — onto a quad kVrHudDist metres ahead in HEAD space, then

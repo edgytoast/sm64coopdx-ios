@@ -256,6 +256,13 @@ static float sm64_gfx_3d_hud = 0.0f;
 // sits BEHIND the world instead of on the panel in front of it.
 static int sm64_gfx_bg_layer = 0;
 
+// Sky-dome flag (charter A8 / R4), the same mechanism one layer out: skybox.c
+// brackets the 3D sphere it builds for VR with its own gDPNoOpTag pair, and while
+// this is set the PERSPECTIVE branch swaps EyeVP for the translation-free sky VP.
+// Without that swap the dome carries the eye's own translation and both eyes see
+// different parallax on it — sky that reads as a ball an arm's length away.
+static int sm64_gfx_sky_layer = 0;
+
 // P[0][0] of the last-seen PERSPECTIVE projection, latched live because SM64's
 // FOV animates (don't hard-code it). The ortho disparity math needs this scale,
 // and the skybox ortho is loaded before the frame's perspective, so the latch is
@@ -282,6 +289,7 @@ static Mat4 sm64_gfx_eye_P;
 const float *sm64_vr_eye_viewproj(int eye);   // sm64_vr_spike.m
 int          sm64_vr_hide_background(void);   // 1 = drop the ortho skybox
 const float *sm64_vr_hud_matrix(int eye);     // ortho -> head-locked plane -> eye clip
+const float *sm64_vr_sky_viewproj(int eye);   // EyeVP minus the translation (sky dome)
 
 // The projection to compose into MP for the eye currently in flight.
 static float (*gfx_stereo_projection(void))[4] {
@@ -314,6 +322,17 @@ static float (*gfx_stereo_projection(void))[4] {
                     return sm64_gfx_eye_P;
                 }
                 return rsp.P_matrix;
+            }
+            // The SKY DOME (charter A8): perspective geometry that must NOT take
+            // this eye's translation, or the two eyes disagree about where the
+            // sky is and it stops being sky. Its markers are open only around
+            // skybox.c's sphere, so nothing else can take this branch.
+            if (sm64_gfx_sky_layer) {
+                const float *sky = sm64_vr_sky_viewproj(sm64_gfx_3d_eye);
+                if (sky != NULL) {
+                    memcpy(sm64_gfx_eye_P, sky, sizeof(sm64_gfx_eye_P));
+                    return sm64_gfx_eye_P;
+                }
             }
             memcpy(sm64_gfx_eye_P, vrm, sizeof(sm64_gfx_eye_P));
             return sm64_gfx_eye_P;
@@ -492,6 +511,10 @@ NEW_EXT = """void OPTIMIZE_O3 ext_gfx_run_dl(Gfx* cmd) {
         case G_NOOP:
             if ((uint32_t)cmd->words.w1 == SM64_GFX_TAG_BG_BEGIN) { sm64_gfx_bg_layer = 1; }
             else if ((uint32_t)cmd->words.w1 == SM64_GFX_TAG_BG_END) { sm64_gfx_bg_layer = 0; }
+            // Charter A8: the same bracket around the VR sky dome, which needs the
+            // translation-free VP rather than a disparity tweak.
+            else if ((uint32_t)cmd->words.w1 == SM64_GFX_TAG_SKY_BEGIN) { sm64_gfx_sky_layer = 1; }
+            else if ((uint32_t)cmd->words.w1 == SM64_GFX_TAG_SKY_END) { sm64_gfx_sky_layer = 0; }
             break;
 #endif"""
 t_gfx = replace_once(t_gfx, OLD_EXT, NEW_EXT, "ext-noop-bg", "SM64_GFX_TAG_BG_BEGIN")
@@ -506,6 +529,10 @@ NEW_RESET = """static void gfx_sp_reset(void) {
     // layer active. The skybox sets it via its gDPNoOpTag begin marker and clears
     // it with the end marker; this guards the HUD if a list is torn off early.
     sm64_gfx_bg_layer = 0;
+    // Same guard for the sky dome (A8): a torn list must not leave the WORLD
+    // drawing with the sky's translation-free matrix, which would nail every
+    // object to the eye and look like the level had come loose.
+    sm64_gfx_sky_layer = 0;
 #endif
     rsp.modelview_matrix_stack_size = 1;"""
 t_gfx = replace_once(t_gfx, OLD_RESET, NEW_RESET, "gfx-sp-reset-bg", "P1-a defensive reset")
@@ -770,7 +797,14 @@ NEW_SKY_INC = ('#include "skybox.h"\n'
                '// stereoscopically in FRONT of the world painted behind it. Bracket the\n'
                '// skybox ortho draw with gDPNoOpTag markers so gfx_pc.c can give the\n'
                '// backdrop far-plane disparity instead. All gated so iOS/desktop unaffected.\n'
-               '#include "pc/vision3d/sm64_vision_3d.h"')
+               '#include "pc/vision3d/sm64_vision_3d.h"\n'
+               '#ifdef SM64_VISION_3D\n'
+               '// Charter A8 (R4): in VR the flat skybox above is dropped entirely and a 3D\n'
+               '// dome is built instead — see build_skybox_sphere_vr below. Declared here\n'
+               '// rather than by including sm64_vr_spike.h, which is Objective-C-adjacent\n'
+               '// and drags CompositorServices into a plain game translation unit.\n'
+               'int sm64_vr_sky_dome_active(void);\n'
+               '#endif')
 t_sky = replace_once(orig_sky, OLD_SKY_INC, NEW_SKY_INC, "skybox-include",
                      'pc/vision3d/sm64_vision_3d.h')
 
@@ -806,6 +840,213 @@ NEW_SKY_DL = """        gSPDisplayList(dlist++, dl_skybox_begin);
 #endif
         gSPDisplayList(dlist++, dl_skybox_end);"""
 t_sky = replace_once(t_sky, OLD_SKY_DL, NEW_SKY_DL, "skybox-markers", "SM64_GFX_TAG_BG_BEGIN")
+
+# ---------------------------------------------------------------------------
+# 2c. skybox.c — the VR SKY DOME (charter A8 / R4).
+#
+# The flat skybox is a fullscreen ORTHO image. That works on a screen and cannot
+# work in VR: there is no "screen" to paper, and the P1-a infinity-disparity trick
+# only makes a flat backdrop sit far away, not surround you. So VR drops it
+# (sm64_vr_hide_background) and this builds a real 3D sphere out of the SAME
+# panorama tiles instead.
+#
+# PORTED from RaYRoD's Quest port (their skybox.c build_skybox_sphere_vr), and
+# the tuning constants are theirs, each paid for by a device round we do not have
+# to repeat: DOME_AZ=16 because an 8-gon pinches visibly at the zenith; the tile's
+# V split across DOME_SUBV sub-rings so a row is drawn ONCE (no vertical repeat)
+# while the fade stays finely sampled; the U split across sub-segments because
+# drawing each tile full-width on every segment wraps the 360 panorama into half
+# the space (their "blocky sky"); a shade-alpha ramp LERPing to ENVIRONMENT for
+# the cloud->clear fade, because row 0 is 8 distinct horizontal tiles rather than
+# a vertical gradient and reusing its V cannot fade cleanly; and BILERP because
+# the 32x32 tiles are otherwise visibly point-sampled at dome scale.
+#
+# WHAT IS OURS, not theirs: the matrices. Their port hands the dome a rotation-
+# only sky VP through a GPU-side camera-space path we deliberately skipped
+# (charter "Camera-space capture + uVrVP + tape replay | Skip v1"). We get the
+# same result through the marker mechanism P1-a already established — the dome is
+# bracketed with its own gDPNoOpTag pair and gfx_stereo_projection swaps in
+# sm64_vr_sky_viewproj while it is open. Hence the two matrix loads here:
+#   * a PERSPECTIVE projection, because gfx_stereo_projection picks its branch off
+#     P[3][3] and the skybox draws BEFORE the frame's own perspective is loaded —
+#     a stale ortho left over from last frame's HUD would send the dome down the
+#     2D path. The values are irrelevant (the VR branch replaces the matrix
+#     outright); only "this is perspective" is load-bearing.
+#   * an IDENTITY modelview, pushed and popped, because our EyeVP consumes GAME
+#     CAMERA space: identity puts the sphere's centre exactly on the camera, which
+#     is what makes it a sky you are inside rather than a ball in front of you.
+# ---------------------------------------------------------------------------
+OLD_SKY_DOME = "Gfx *create_skybox_facing_camera(s8 player, s8 background, f32 fov,"
+NEW_SKY_DOME = r'''#ifdef SM64_VISION_3D
+/**
+ * Build the VR sky dome: a parametric (ring x azimuth) sphere textured with the
+ * skybox's own panorama tiles, world-locked by baking the game camera's yaw and
+ * pitch into the geometry. Returns NULL if the display-list pool is exhausted,
+ * in which case the caller falls back to the ordinary flat skybox.
+ */
+static Gfx *build_skybox_sphere_vr(s8 player, s8 background, s8 colorIndex) {
+#define DOME_AZ        16      /* azimuth segments; 8 pinches at the pole */
+#define DOME_SUBV      3       /* fine sub-rings per panorama row */
+#define FADE_START_DEG 30.0f   /* clouds are full below this elevation */
+#define FADE_END_DEG   60.0f   /* fully clear (ENV) above it -> no clouds at the zenith */
+    const s32 NRINGS = 8 * DOME_SUBV;   /* 8 panorama rows x sub-rings */
+
+    /* 16 fixed commands + 8 per quad — 8 is the same per-tile budget the flat
+       skybox above proves correct for this exact sequence (env colour, block
+       texture load, verts, quad DL). */
+    Gfx *dl = alloc_display_list((16 + NRINGS * DOME_AZ * 8) * sizeof(Gfx));
+    Mtx *ident = alloc_display_list(sizeof(Mtx));
+    Mtx *persp = alloc_display_list(sizeof(Mtx));
+    if (dl == NULL || ident == NULL || persp == NULL) { return NULL; }
+
+    u16 perspNorm;
+    guMtxIdent(ident);
+    guPerspective(persp, &perspNorm, 90.0f, 1.0f, 100.0f, 20000.0f, 1.0f);
+
+    Gfx *g = dl;
+    /* Marker FIRST: the flag must be set before any matrix load composes MP. */
+    gDPNoOpTag(g++, SM64_GFX_TAG_SKY_BEGIN);
+    gSPMatrix(g++, VIRTUAL_TO_PHYSICAL(persp), G_MTX_PROJECTION | G_MTX_LOAD | G_MTX_NOPUSH);
+    gSPMatrix(g++, VIRTUAL_TO_PHYSICAL(ident), G_MTX_MODELVIEW | G_MTX_LOAD | G_MTX_PUSH);
+    gSPDisplayList(g++, dl_skybox_begin);
+    gSPDisplayList(g++, dl_skybox_tile_tex_settings);
+    /* Cloud->clear LERP: RGB = (TEXEL0 - ENV) * shade.a + ENV ; A = ENV.a (255,
+       so the output stays opaque). shade.a = 1 -> pure panorama texel, 0 -> the
+       clear-sky ENV colour. */
+    gDPSetCombineLERP(g++, TEXEL0, ENVIRONMENT, SHADE_ALPHA, ENVIRONMENT, 0, 0, 0, ENVIRONMENT,
+                           TEXEL0, ENVIRONMENT, SHADE_ALPHA, ENVIRONMENT, 0, 0, 0, ENVIRONMENT);
+    gDPSetTextureFilter(g++, G_TF_BILERP);
+
+    const f32 R        = 1000.0f;   /* game units; translation-free VP => radius sets clipping only */
+    const f32 DEG2RAD  = (f32)(M_PI / 180.0f);
+    const f32 camYaw   = sSkyBoxInfo[player].yaw;   /* world-anchors the dome against camera turn */
+    const f32 camPitch = sSkyBoxInfo[player].pitch; /* ...and against camera pitch */
+    const s32 subPerCol = DOME_AZ / 8;              /* azimuth segments per panorama column */
+
+    for (s32 ring = 0; ring < NRINGS; ring++) {
+        const s32 row = ring / DOME_SUBV;
+        const s32 sv  = ring % DOME_SUBV;
+        const f32 rowTopDeg = 90.0f - (f32) row      * 22.5f;
+        const f32 rowBotDeg = 90.0f - (f32)(row + 1) * 22.5f;
+        const f32 elTopDeg = rowTopDeg + (rowBotDeg - rowTopDeg) * ((f32) sv      / (f32) DOME_SUBV);
+        const f32 elBotDeg = rowTopDeg + (rowBotDeg - rowTopDeg) * ((f32)(sv + 1) / (f32) DOME_SUBV);
+        const f32 el0 = elTopDeg * DEG2RAD;
+        const f32 el1 = elBotDeg * DEG2RAD;
+        /* V split so the tile is drawn ONCE per row rather than repeated per sub-ring. */
+        const s32 vTop = sv       * (31 << 5) / DOME_SUBV;
+        const s32 vBot = (sv + 1) * (31 << 5) / DOME_SUBV;
+        const u8 aTop = skybox_dome_fade_alpha(elTopDeg, FADE_START_DEG, FADE_END_DEG);
+        const u8 aBot = skybox_dome_fade_alpha(elBotDeg, FADE_START_DEG, FADE_END_DEG);
+
+        for (s32 col = 0; col < DOME_AZ; col++) {
+            s32 panCol = col / subPerCol;
+            if (panCol < 0) { panCol = 0; }
+            if (panCol > 7) { panCol = 7; }
+            /* U split across sub-segments, or the 360 panorama wraps in half the space. */
+            const s32 subIdx = col % subPerCol;
+            const s32 uLeft  = subIdx       * (31 << 5) / subPerCol;
+            const s32 uRight = (subIdx + 1) * (31 << 5) / subPerCol;
+            s32 tileIndex = row * SKYBOX_COLS + panCol;
+            if (tileIndex < 0)  { tileIndex = 0;  }
+            if (tileIndex > 79) { tileIndex = 79; }
+            const Texture *tex = (background < 0 || background >= 10)
+                ? gCustomSkyboxPtrList[tileIndex]
+                : (*(SkyboxTexture *) segmented_to_virtual(sSkyboxTextures[background]))[tileIndex];
+
+            f32 cr = gSkyboxColor[0] / 255.0f;
+            f32 cg = gSkyboxColor[1] / 255.0f;
+            f32 cb = gSkyboxColor[2] / 255.0f;
+            u8 *color = sSkyboxColors[colorIndex];
+            gDPSetEnvColor(g++, color[0] * cr, color[1] * cg, color[2] * cb, 255);
+
+            Vtx *v = alloc_display_list(4 * sizeof(Vtx));
+            if (v == NULL) { continue; }
+            const f32 az0 = ((f32) col)      / (f32) DOME_AZ * 2.0f * M_PI + camYaw;
+            const f32 az1 = ((f32)(col + 1)) / (f32) DOME_AZ * 2.0f * M_PI + camYaw;
+            skybox_dome_vertex(v, 0, R, az0, el0, camPitch, uLeft,  vTop, aTop);
+            skybox_dome_vertex(v, 1, R, az0, el1, camPitch, uLeft,  vBot, aBot);
+            skybox_dome_vertex(v, 2, R, az1, el1, camPitch, uRight, vBot, aBot);
+            skybox_dome_vertex(v, 3, R, az1, el0, camPitch, uRight, vTop, aTop);
+
+            gLoadBlockTexture(g++, 32, 32, G_IM_FMT_RGBA, tex);
+            gSPVertex(g++, VIRTUAL_TO_PHYSICAL(v), 4, 0);
+            gSPDisplayList(g++, dl_draw_quad_verts_0123);
+        }
+    }
+
+    gSPDisplayList(g++, dl_skybox_end);
+    gSPPopMatrix(g++, G_MTX_MODELVIEW);
+    gDPNoOpTag(g++, SM64_GFX_TAG_SKY_END);
+    gSPEndDisplayList(g);
+#undef DOME_AZ
+#undef DOME_SUBV
+#undef FADE_START_DEG
+#undef FADE_END_DEG
+    return dl;
+}
+#endif
+
+Gfx *create_skybox_facing_camera(s8 player, s8 background, f32 fov,'''
+t_sky = replace_once(t_sky, OLD_SKY_DOME, NEW_SKY_DOME, "skybox-dome-builder",
+                     "static Gfx *build_skybox_sphere_vr")
+
+# The two dome helpers, above the builder so it can call them. Kept as real
+# functions rather than the donor's statement-expression macros: those rely on a
+# GNU extension and hid a `continue` inside a macro body, and there is no reason
+# to inherit that here.
+OLD_SKY_HELPERS = "/**\n * Creates the skybox's display list, then draws the 3x3 grid of tiles.\n */"
+NEW_SKY_HELPERS = r'''#ifdef SM64_VISION_3D
+/**
+ * Smoothstep cloud->clear ramp for the VR dome: 255 (full panorama) at and below
+ * startDeg, 0 (pure ENV clear sky) at and above endDeg.
+ */
+static u8 skybox_dome_fade_alpha(f32 elDeg, f32 startDeg, f32 endDeg) {
+    f32 t = (elDeg - startDeg) / (endDeg - startDeg);
+    if (t < 0.0f) { t = 0.0f; }
+    if (t > 1.0f) { t = 1.0f; }
+    return (u8) (255.0f * (1.0f - t * t * (3.0f - 2.0f * t)));
+}
+
+/**
+ * One dome vertex: a point on the sphere at (azimuth, elevation), rotated about
+ * the X (right) axis by the camera pitch so the horizon stays world-locked as
+ * the game camera looks up and down. -Z is the forward base direction.
+ */
+static void skybox_dome_vertex(Vtx *v, s32 idx, f32 R, f32 az, f32 el, f32 camPitch,
+                               s32 u, s32 tv, u8 a) {
+    f32 x = R * cosf(el) * sinf(az);
+    f32 y = R * sinf(el);
+    f32 z = -R * cosf(el) * cosf(az);
+    f32 y2 =  y * cosf(camPitch) + z * sinf(camPitch);
+    f32 z2 = -y * sinf(camPitch) + z * cosf(camPitch);
+    make_vertex(v, idx, (s16) x, (s16) y2, (s16) z2, (s16) u, (s16) tv, 255, 255, 255, a);
+}
+#endif
+
+/**
+ * Creates the skybox's display list, then draws the 3x3 grid of tiles.
+ */'''
+t_sky = replace_once(t_sky, OLD_SKY_HELPERS, NEW_SKY_HELPERS, "skybox-dome-helpers",
+                     "static u8 skybox_dome_fade_alpha")
+
+# The swap itself. In VR the dome REPLACES the flat skybox; if the dome cannot be
+# built (pool exhausted) we fall through to the flat one rather than returning
+# NULL, so the worst case is the old look and never a missing draw.
+OLD_SKY_RET = """    return init_skybox_display_list(player, background, colorIndex);
+}"""
+NEW_SKY_RET = """#ifdef SM64_VISION_3D
+    // Charter A8: in VR the flat ortho skybox is dropped by gfx_pc.c and this 3D
+    // dome stands in for it. Gated on the same predicate as that drop, so the two
+    // can never disagree and leave the sky either doubled or missing.
+    if (sm64_vr_sky_dome_active()) {
+        Gfx *dome = build_skybox_sphere_vr(player, background, colorIndex);
+        if (dome != NULL) { return dome; }
+    }
+#endif
+    return init_skybox_display_list(player, background, colorIndex);
+}"""
+t_sky = replace_once(t_sky, OLD_SKY_RET, NEW_SKY_RET, "skybox-dome-swap",
+                     "if (sm64_vr_sky_dome_active())")
 
 diffs.append(diff_edit(orig_sky, t_sky, REL_SKY))
 

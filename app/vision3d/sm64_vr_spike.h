@@ -100,6 +100,13 @@ void        sm64_vr_preset_reset_current(void);
 // are gated on this: outside first-person the controllers are just a pad.
 bool        sm64_vr_first_person_active(void);
 
+// Sky dome (charter A8 / R4). skybox.c asks whether to build the 3D sphere in
+// place of the flat ortho skybox; gfx_pc.c asks for the dome's translation-free
+// view-projection while the dome's markers are open. Both return the "no" answer
+// (0 / NULL) on panel-fallback frames, so those keep the ordinary flat sky.
+int          sm64_vr_sky_dome_active(void);
+const float *sm64_vr_sky_viewproj(int eye);
+
 // D-pad up cycles the view mode without opening a menu (donor pc_main.c:497-503).
 // Engine thread only — it reads the game's controller state.
 void sm64_vr_poll_hotkeys(void);

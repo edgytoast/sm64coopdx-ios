@@ -63,6 +63,19 @@ extern "C" {
 #define SM64_GFX_TAG_BG_BEGIN 0x534B5942u  // 'SKYB' — background layer begin
 #define SM64_GFX_TAG_BG_END   0x534B5945u  // 'SKYE' — background layer end
 
+// Sky-dome markers (charter A8 / R4). In VR the ortho skybox is useless — a
+// fullscreen 2D image cannot surround you — so it is dropped (sm64_vr_hide_
+// background) and skybox.c builds a real 3D sphere instead. The dome is
+// PERSPECTIVE geometry, so it would otherwise take the ordinary EyeVP and pick
+// up that eye's translation: at any radius small enough to survive the far
+// plane, the two eyes see measurably different parallax and the sky reads as a
+// painted ball a foot from your face rather than as sky. These markers bracket
+// the dome so gfx_stereo_projection() hands it the TRANSLATION-FREE VP instead
+// (sm64_vr_sky_viewproj), which is the donor's rotation-only sky VP by another
+// name: same rotation, no parallax, sky at infinity at any radius.
+#define SM64_GFX_TAG_SKY_BEGIN 0x53444D42u  // 'SDMB' — sky dome begin
+#define SM64_GFX_TAG_SKY_END   0x53444D45u  // 'SDME' — sky dome end
+
 // 3D mode: while ON, gfx_metal renders into the offscreen per-eye textures and
 // NEVER acquires or presents the window's drawable. That is load-bearing, not an
 // optimisation: the 2D window is hidden behind the immersive space and its

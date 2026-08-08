@@ -5106,7 +5106,7 @@ WHAT IS NOT TOUCHED
 +#endif // CONTROLLER_VISION_H
 --- /dev/null
 +++ b/src/pc/vision3d/controller_vision.m
-@@ -0,0 +1,327 @@
+@@ -0,0 +1,355 @@
 +// controller_vision.m — PSVR2 Sense controllers as an N64 pad (charter R3 / A10).
 +//
 +// A ControllerAPI backend registered beside controller_sdl, exactly as the donor
@@ -5309,6 +5309,33 @@ WHAT IS NOT TOUCHED
 +}
 +
 +static void controller_vision_read(OSContPad *pad) {
++    // INPUT BELONGS TO SDL. FULL STOP, until this layout is proven on device.
++    //
++    // 1.1.2.22 was a total bust and this function is why. The SpatialGamepad
++    // declaration worked — the pair started enumerating as two spatial
++    // controllers — and the SDL filter shipped alongside it then handed input to
++    // THIS code, whose element names were guessed from a Mac and had never once
++    // run. The result on device: SDL saw no joysticks at all, so the game showed
++    // the touchscreen controls, while the handful of guessed names that happened
++    // to match delivered a few working buttons and nothing else. Z and R, whose
++    // trigger aliases were pure guesswork, were among the casualties.
++    //
++    // The lesson is not "the layout was wrong", it is that a working input path
++    // was removed in the same build that introduced its unproven replacement.
++    // SDL drives the pair again — which is also what Austin asked for outright on
++    // 2026-08-08: outside first-person the Sense pair should behave exactly like a
++    // regular controller. This backend keeps its device inventory (that is how
++    // sm64_vr_hands.m learns about the controllers at all) and contributes
++    // NOTHING to the pad.
++    //
++    // Re-enabling this needs the real element names from a device inventory log,
++    // and Fable's corrections: prefer GCControllerLiveInput, where the thumbstick
++    // lives under `dpads` (not `axes`), and read analog triggers through
++    // pressedInput.value.
++    (void)pad;
++    return;
++
++#if 0
 +    GCController *L = sHand[0], *R = sHand[1];
 +    if (L == nil && R == nil) { return; }   // nothing held: report nothing, hold nothing
 +
@@ -5392,6 +5419,7 @@ WHAT IS NOT TOUCHED
 +        prev = now;
 +        if (startFrames > 0) { startFrames--; pad->button |= START_BUTTON; }
 +    }
++#endif // 0 — see the top of this function
 +}
 +
 +// Per-hand haptics. The donor's burst pattern: short and sharp, because the

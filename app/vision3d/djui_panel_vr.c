@@ -26,11 +26,15 @@ static unsigned int sUiStereo;   // percent of a true IPD
 static unsigned int sUiRender;   // percent of the per-eye view resolution
 static unsigned int sUiDim;      // percent
 static unsigned int sUiMsaa;     // index into sMsaaChoices
+static unsigned int sUiMode;     // view mode (sm64_vr_presets.c)
 static bool sUiWorldLock;
 
 // DJUI sliders are unsigned, and the world can sit BELOW eye level (it usually
 // should — you look down at a diorama), so the height row carries a bias.
 #define VR_HEIGHT_BIAS 150   // slider 0..200 == -1.50 m .. +0.50 m
+// Distance can be NEGATIVE: third-person puts the game's camera essentially
+// at you, so the level surrounds you instead of sitting in front of you.
+#define VR_DIST_BIAS 50      // slider 0..350 == -0.50 m .. +3.00 m
 
 static const int sMsaaSamples[] = { 1, 2, 4, 8 };
 #define VR_MSAA_COUNT ((int)(sizeof(sMsaaSamples) / sizeof(sMsaaSamples[0])))
@@ -46,7 +50,8 @@ static unsigned int vr_msaa_index_of(int samples) {
 // always show what is actually live, including anything changed from the sheet.
 static void vr_panel_pull(void) {
     sUiScale     = (unsigned int) sm64_3d_setting_f("vrScale", SM64_DEF_VRSCALE);
-    sUiDist      = (unsigned int) (sm64_3d_setting_f("vrDist", SM64_DEF_VRDIST) * 100.0f);
+    sUiDist      = (unsigned int) (sm64_3d_setting_f("vrDist", SM64_DEF_VRDIST) * 100.0f
+                                   + VR_DIST_BIAS);
     sUiHeight    = (unsigned int) (sm64_3d_setting_f("vrHeight", SM64_DEF_VRHEIGHT) * 100.0f
                                    + VR_HEIGHT_BIAS);
     sUiStereo    = (unsigned int) (sm64_3d_setting_f("vrStereo", SM64_DEF_VRSTEREO) * 100.0f);
@@ -54,6 +59,14 @@ static void vr_panel_pull(void) {
     sUiDim       = (unsigned int) (sm64_3d_setting_f("vrDim", SM64_DEF_VRDIM) * 100.0f);
     sUiMsaa      = vr_msaa_index_of((int) sm64_3d_setting_f("vrMsaa", SM64_DEF_VRMSAA));
     sUiWorldLock = sm64_3d_setting_f("vrLock", SM64_DEF_VRWORLDLOCK) > 0.5f;
+    sUiMode      = (unsigned int) sm64_vr_preset_get();
+}
+
+// Switching modes restores that mode's own numbers, so the sliders below have to
+// follow — otherwise they would show the mode you just left.
+static void vr_panel_mode_changed(UNUSED struct DjuiBase *caller) {
+    sm64_vr_preset_apply((int) sUiMode);
+    vr_panel_pull();
 }
 
 // Write the mirrors back and apply. Applying LIVE is the whole point: these are
@@ -61,7 +74,7 @@ static void vr_panel_pull(void) {
 // is exactly how the donor's were tuned.
 static void vr_panel_push(UNUSED struct DjuiBase *caller) {
     sm64_3d_setting_set_f("vrScale", (float) sUiScale);
-    sm64_3d_setting_set_f("vrDist", (float) sUiDist / 100.0f);
+    sm64_3d_setting_set_f("vrDist", ((float) sUiDist - VR_DIST_BIAS) / 100.0f);
     sm64_3d_setting_set_f("vrHeight", ((float) sUiHeight - VR_HEIGHT_BIAS) / 100.0f);
     sm64_3d_setting_set_f("vrStereo", (float) sUiStereo / 100.0f);
     sm64_3d_setting_set_f("vrRender", (float) sUiRender / 100.0f);
@@ -78,9 +91,9 @@ static void vr_panel_recenter(UNUSED struct DjuiBase *caller) {
 }
 
 static void vr_panel_reset(UNUSED struct DjuiBase *caller) {
-    sm64_3d_setting_set_f("vrScale", SM64_DEF_VRSCALE);
-    sm64_3d_setting_set_f("vrDist", SM64_DEF_VRDIST);
-    sm64_3d_setting_set_f("vrHeight", SM64_DEF_VRHEIGHT);
+    // Placement goes back to the ACTIVE mode's stock numbers, not to Diorama's:
+    // "reset" in a mode should mean "this mode, as it shipped".
+    sm64_vr_preset_reset_current();
     sm64_3d_setting_set_f("vrStereo", SM64_DEF_VRSTEREO);
     sm64_3d_setting_set_f("vrRender", SM64_DEF_VRRENDER);
     sm64_3d_setting_set_f("vrDim", SM64_DEF_VRDIM);
@@ -100,11 +113,21 @@ void djui_panel_vr_create(struct DjuiBase *caller) {
     struct DjuiThreePanel *panel = djui_panel_menu_create("VR", false);
     struct DjuiBase *body = djui_three_panel_get_body(panel);
     {
-        // Placement first: this is what people reach for, and it is the group
-        // that decides whether the world feels like a toy on a table or a room
-        // you are standing in.
+        // The mode comes first because it MOVES the rows under it: each mode
+        // remembers its own placement, and picking one loads that set.
+        {
+            int n = sm64_vr_preset_count();
+            if (n > 4) { n = 4; }
+            char *choices[4];
+            for (int i = 0; i < n; i++) { choices[i] = (char *) sm64_vr_preset_name(i); }
+            djui_selectionbox_create(body, "VR Mode", choices, (u8) n, &sUiMode,
+                                     vr_panel_mode_changed);
+        }
+
+        // Placement: this is the group that decides whether the world feels like
+        // a toy on a table or a place you are standing in.
         djui_slider_create(body, "World Size", &sUiScale, 300, 6000, vr_panel_push);
-        djui_slider_create(body, "World Distance", &sUiDist, 30, 300, vr_panel_push);
+        djui_slider_create(body, "World Distance", &sUiDist, 0, 350, vr_panel_push);
         djui_slider_create(body, "World Height", &sUiHeight, 0, 200, vr_panel_push);
         djui_checkbox_create(body, "World Lock", &sUiWorldLock, vr_panel_push);
 

@@ -200,6 +200,8 @@ NEW_FILES = [
     "djui_panel_vr.c",
     # Charter A5: the menu/gameplay predicate, read from the game's own state.
     "sm64_vr_gamestate.c",
+    # Charter R2: the view modes and their remembered tunables.
+    "sm64_vr_presets.c",
 ]
 for name in NEW_FILES:
     src = APP / name

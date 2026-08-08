@@ -67,6 +67,7 @@ static float sVrDist   = 0.60f;   // metres in front of the frozen head (donor 0
 static float sVrHeight = -0.35f;  // metres relative to eye level
 static float sVrStereo = 1.00f;   // eye offset as a fraction of the true IPD (1.0 = geometrically true)
 static const float kVrClipMargin = 0.30f; // donor sClipMargin: minimum anchor standoff
+static float sVrClipPush = 0.0f;          // the eased anti-clip pushback, metres
 
 static float sVrEyeVP[2][4][4];
 static float sVrHudVP[2][4][4];
@@ -318,19 +319,45 @@ static void sm64_vr_log_projection(int eye, simd_float4x4 cp, simd_float4x4 fixe
 // Place the game's camera space in the room: camera origin sVrDist ahead of the
 // frozen head at kVrHeight, facing the way the head faced (levelled — no pitch
 // or roll leaks into the world, the same rule the 3D panel already follows).
-static simd_float4x4 sm64_vr_placement(simd_float4x4 frozenHead) {
+static simd_float4x4 sm64_vr_placement(simd_float4x4 frozenHead, simd_float4x4 liveHead) {
     simd_float3 headPos = frozenHead.columns[3].xyz;
     simd_float3 fwd = -frozenHead.columns[2].xyz;
     fwd.y = 0.0f;
     float len = simd_length(fwd);
     fwd = (len < 1e-4f) ? simd_make_float3(0, 0, -1) : fwd / len;
 
-    // Donor standoff (vr.c:519): never let the anchor sit closer than the clip
-    // margin. Frozen-pose, so this is the resting case of the donor's anti-clip
-    // — the lean-in tracking is R2 work.
-    float dist = (sVrDist < kVrClipMargin) ? kVrClipMargin : sVrDist;
-    simd_float3 pos = headPos + fwd * dist;
+    simd_float3 pos = headPos + fwd * sVrDist;
     pos.y += sVrHeight;
+
+    // ANTI-CLIP (charter R2, donor vr.c:288/519). Keep the anchor at least
+    // kVrClipMargin from your ACTUAL head, and push it away along the line
+    // between you when you get closer — so leaning in to look at the diorama
+    // backs the world off instead of letting you put your face inside it. The
+    // distance slider is therefore free to go negative (third-person parks the
+    // game's camera essentially at you) without the world ending up in your
+    // skull: this is what enforces the floor, not a clamp on the number.
+    //
+    // Eased rather than snapped: a hard correction reads as the world flinching.
+    // This is the GEOMETRIC half of the donor's anti-clip; theirs also runs level
+    // collision so the eye cannot end up inside a wall, which needs the engine
+    // thread and is a later step.
+    {
+        simd_float3 livePos = liveHead.columns[3].xyz;
+        simd_float3 toAnchor = pos - livePos;
+        float d = simd_length(toAnchor);
+        if (d < kVrClipMargin) {
+            simd_float3 dir = (d > 1e-4f) ? (toAnchor / d) : fwd;
+            float want = kVrClipMargin - d;
+            sVrClipPush += (want - sVrClipPush) * 0.25f;   // ease in fast
+            pos += dir * sVrClipPush;
+        } else if (sVrClipPush > 0.0005f) {
+            sVrClipPush *= 0.90f;                          // relax back slowly
+            simd_float3 dir = (d > 1e-4f) ? (toAnchor / d) : fwd;
+            pos += dir * sVrClipPush;
+        } else {
+            sVrClipPush = 0.0f;
+        }
+    }
 
     simd_float3 zAxis = -fwd;                                   // camera looks down -Z
     simd_float3 yAxis = simd_make_float3(0, 1, 0);
@@ -383,7 +410,7 @@ static void sm64_vr_build_matrices(cp_drawable_t drawable, simd_float4x4 frozenH
     const float invS = 1.0f / sVrScale;
     simd_float4x4 scale = matrix_identity_float4x4;
     scale.columns[0].x = invS; scale.columns[1].y = invS; scale.columns[2].z = invS;
-    simd_float4x4 A = simd_mul(sm64_vr_placement(frozenHead), scale);
+    simd_float4x4 A = simd_mul(sm64_vr_placement(frozenHead, liveHead), scale);
 
     // Clip planes in METRES (A has already taken game units out). Near 0.05 is
     // the donor's decal z-fight lesson; far tracks the world's scaled size.

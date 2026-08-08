@@ -29,6 +29,7 @@
 #include "game/ingame_menu.h"      // gMenuMode
 #include "game/level_update.h"     // gCurrCreditsEntry
 #include "game/game_init.h"        // gCurrDemoInput
+#include "pc/vision3d/sm64_vr_spike.h"  // sm64_vr_preset_cycle
 
 bool sm64_vr_frame_is_nongameplay(void) {
     // A door / level transition is a 2D fullscreen effect. In the stereo world
@@ -41,6 +42,19 @@ bool sm64_vr_frame_is_nongameplay(void) {
     if (gCurrDemoInput != NULL)    { return true; }  // attract-mode demo
     if (gMenuMode != -1)           { return true; }  // pause star grid / course complete
     return false;                                    // active gameplay
+}
+
+// D-pad UP cycles the view mode, so switching does not mean opening a menu
+// inside the headset (donor pc_main.c:497-503). Edge-detected, and ignored while
+// a menu panel is open so it cannot fight the menu's own d-pad navigation.
+void sm64_vr_poll_hotkeys(void) {
+    extern struct Controller *gPlayer1Controller;
+    static u16 sPrevDpadUp = 0;
+    u16 up = gPlayer1Controller ? (u16)(gPlayer1Controller->buttonDown & U_JPAD) : 0;
+    if (up && !sPrevDpadUp && !djui_panel_is_active() && !gDjuiInMainMenu) {
+        sm64_vr_preset_cycle();
+    }
+    sPrevDpadUp = up;
 }
 
 #endif // SM64_VISION_3D

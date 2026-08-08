@@ -294,6 +294,7 @@ void sm64_3d_frame_poll(void) {
     // game loop's thread), so the compositor never reads game state.
     if (sm64_vr_spike_variant != 0) {
         sm64_vr_spike_set_panel_mode(sm64_vr_frame_is_nongameplay() ? 1 : 0);
+        sm64_vr_poll_hotkeys();   // d-pad up cycles the view mode
     }
 
     // R0 SPIKE (throwaway): arm the console bridge on the DEVICE. The bridge is

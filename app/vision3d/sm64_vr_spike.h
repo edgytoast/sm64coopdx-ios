@@ -87,6 +87,19 @@ int  sm64_vr_spike_panel_mode(void);
 // "Is this frame a menu?" — sm64_vr_gamestate.c, evaluated on the engine thread.
 bool sm64_vr_frame_is_nongameplay(void);
 
+// VR view modes (sm64_vr_presets.c). A mode is a remembered set of placement
+// numbers; switching snapshots what you dialled in and restores the other's.
+int         sm64_vr_preset_count(void);
+const char *sm64_vr_preset_name(int i);
+int         sm64_vr_preset_get(void);
+void        sm64_vr_preset_apply(int idx);
+void        sm64_vr_preset_cycle(void);
+void        sm64_vr_preset_reset_current(void);
+
+// D-pad up cycles the view mode without opening a menu (donor pc_main.c:497-503).
+// Engine thread only — it reads the game's controller state.
+void sm64_vr_poll_hotkeys(void);
+
 // The VR eye-texture size, so gfx_metal and gfx_pc can both size from the VIEW
 // instead of the flat panel's budget. Returns 0 when VR is not driving.
 int sm64_vr_spike_render_size(int *w, int *h);

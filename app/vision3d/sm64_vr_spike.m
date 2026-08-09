@@ -261,13 +261,22 @@ int sm64_vr_camera_from_world(float *out16) {
     return 1;
 }
 
-int sm64_vr_hide_background(void) { return sVrWorld && !sVrPanelMode; }
+// The `variant` clause is what makes leaving VR give the flat sky back. sVrWorld
+// is latched when the VR loop starts and was never cleared when it stopped, so
+// after an exit this still answered "drop the skybox" and the 2D panel rendered
+// a black sky (Austin, 2026-08-09). Whether to hide the background is a question
+// only VR gets to answer.
+int sm64_vr_hide_background(void) {
+    return sm64_vr_spike_variant != 0 && sVrWorld && !sVrPanelMode;
+}
 
 // Whether skybox.c should build the 3D dome INSTEAD of the flat ortho skybox.
 // Deliberately the same predicate as hide_background: those two are the two
 // halves of one decision (drop the flat image, draw the sphere), and letting
 // them disagree is how you get either two skies or none.
-int sm64_vr_sky_dome_active(void) { return sVrWorld && !sVrPanelMode; }
+int sm64_vr_sky_dome_active(void) {
+    return sm64_vr_spike_variant != 0 && sVrWorld && !sVrPanelMode;
+}
 
 // The compositor's own projection with ONLY its depth row replaced.
 //
@@ -897,6 +906,7 @@ void sm64_vr_spike_run(void *layer_renderer_ptr, int variant) {
     while (running) {
         if (sm64_vr_spike_stop) {
             NSLog(@"[vrspike] stop requested, exiting (frames=%d)", frames);
+            sVrWorld = 0;   // belt and braces: nothing should read this after the loop
             running = 0;
             continue;
         }

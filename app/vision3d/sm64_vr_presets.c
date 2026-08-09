@@ -14,6 +14,7 @@
 // know modes exist, and a mode is a slot, not a second source of truth.
 
 #include "pc/vision3d/sm64_vision_3d.h"
+#include "pc/vision3d/sm64_vr_spike.h"   // sm64_vr_spike_variant: is VR actually running
 
 #ifdef SM64_VISION_3D
 
@@ -122,6 +123,12 @@ void sm64_vr_preset_apply(int idx) {
 // is false today — but the hand-shaped gestures are gated on it rather than on
 // nothing, so adding the mode turns them on instead of needing them found again.
 bool sm64_vr_first_person_active(void) {
+    // ...AND VR must actually be running. Without that clause the preset alone
+    // answered yes, so leaving VR left the game's own first-person camera
+    // asserted and Mario invisible back on the flat panel (Austin, 2026-08-09).
+    // First-person is a VR VIEW MODE, not a game setting; it has no meaning
+    // outside the mode that owns it.
+    if (sm64_vr_spike_variant == 0) { return false; }
     return sPresets[sm64_vr_preset_get()].firstPerson;
 }
 

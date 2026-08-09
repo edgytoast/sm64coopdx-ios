@@ -4372,7 +4372,7 @@ WHAT IS NOT TOUCHED
 +#endif // DJUI_PANEL_VR_H
 --- /dev/null
 +++ b/src/pc/vision3d/djui_panel_vr.c
-@@ -0,0 +1,217 @@
+@@ -0,0 +1,224 @@
 +// djui_panel_vr.c — the in-game VR options panel (Options -> VR).
 +//
 +// See djui_panel_vr.h for why this exists and what belongs here rather than in
@@ -4393,7 +4393,8 @@ WHAT IS NOT TOUCHED
 +#include "pc/djui/djui_panel_menu.h"
 +#include "pc/vision3d/sm64_vr_spike.h"
 +#include <stdio.h>
-+#include "pc/vision3d/sm64_vr_hands.h"  // the hands status line
++#include "pc/vision3d/sm64_vr_hands.h"
++#include "pc/vision3d/controller_vision.h"  // the pad inventory row  // the hands status line
 +
 +// Widget mirrors, in menu units.
 +static unsigned int sUiScale;    // game units per metre (a bigger world number = a smaller world)
@@ -4480,6 +4481,7 @@ WHAT IS NOT TOUCHED
 +
 +static char sHandsStatus[64];
 +static char sTexStatus[64];
++static char sPadStatus[128];
 +
 +// The hands status row is a readout, not a control.
 +static void vr_panel_noop(UNUSED struct DjuiBase *caller) { }
@@ -4568,6 +4570,11 @@ WHAT IS NOT TOUCHED
 +                     sm64_gfx_texture_wraps());
 +            djui_button_create(body, sTexStatus, DJUI_BUTTON_STYLE_NORMAL, vr_panel_noop);
 +        }
++        // What GameController actually sees. Category "Spatial Controller"
++        // confirms the SpatialGamepad declaration took, and whether the old
++        // aggregate MFi device persists beside the pair.
++        sm64_vr_pad_status(sPadStatus, (int) sizeof(sPadStatus));
++        djui_button_create(body, sPadStatus, DJUI_BUTTON_STYLE_NORMAL, vr_panel_noop);
 +
 +        // Comfort and image.
 +        djui_slider_create(body, "Stereo Depth", &sUiStereo, 0, 100, vr_panel_push);
@@ -5086,7 +5093,7 @@ WHAT IS NOT TOUCHED
 +#endif // SM64_VISION_3D
 --- /dev/null
 +++ b/src/pc/vision3d/controller_vision.h
-@@ -0,0 +1,17 @@
+@@ -0,0 +1,22 @@
 +#ifndef CONTROLLER_VISION_H
 +#define CONTROLLER_VISION_H
 +
@@ -5102,11 +5109,16 @@ WHAT IS NOT TOUCHED
 +
 +extern struct ControllerAPI controller_vision;
 +
++// One line of controller inventory for the VR panel: how many pads, each one's
++// product category, and how many buttons/dpads it exposes. Readable in-headset
++// because that is where the person who can generate it actually is.
++void sm64_vr_pad_status(char *buf, int len);
++
 +#endif // SM64_VISION_3D
 +#endif // CONTROLLER_VISION_H
 --- /dev/null
 +++ b/src/pc/vision3d/controller_vision.m
-@@ -0,0 +1,355 @@
+@@ -0,0 +1,376 @@
 +// controller_vision.m — PSVR2 Sense controllers as an N64 pad (charter R3 / A10).
 +//
 +// A ControllerAPI backend registered beside controller_sdl, exactly as the donor
@@ -5280,6 +5292,27 @@ WHAT IS NOT TOUCHED
 +            NSLog(@"[vrpad] %s controller disconnected", i == 0 ? "LEFT" : "RIGHT");
 +        }
 +    }
++}
++
++// The controller inventory, readable FROM INSIDE THE HEADSET. The element names
++// this reports are the thing every remaining decision needs — a native input
++// path was already shipped once on guessed names and broke Z and R — and the
++// person who can produce them is wearing a Vision Pro, not sitting at a Mac
++// console. So it goes in the VR panel.
++void sm64_vr_pad_status(char *buf, int len) {
++    if (buf == NULL || len <= 0) { return; }
++    NSArray<GCController *> *cs = GCController.controllers;
++    if (cs.count == 0) { snprintf(buf, (size_t) len, "Pads: none"); return; }
++    NSMutableString *s = [NSMutableString stringWithFormat:@"Pads: %lu", (unsigned long) cs.count];
++    for (GCController *c in cs) {
++        // "Spatial Controller" vs "MFi" is THE question: it says whether the
++        // SpatialGamepad declaration took effect, and whether the aggregate
++        // device persists beside the spatial pair.
++        [s appendFormat:@" [%@ %lub/%lud]", c.productCategory,
++            (unsigned long) c.physicalInputProfile.buttons.allKeys.count,
++            (unsigned long) c.physicalInputProfile.dpads.allKeys.count];
++    }
++    snprintf(buf, (size_t) len, "%s", s.UTF8String);
 +}
 +
 +// ---------------------------------------------------------------------------

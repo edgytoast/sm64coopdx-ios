@@ -18,7 +18,8 @@
 #include "pc/djui/djui_panel_menu.h"
 #include "pc/vision3d/sm64_vr_spike.h"
 #include <stdio.h>
-#include "pc/vision3d/sm64_vr_hands.h"  // the hands status line
+#include "pc/vision3d/sm64_vr_hands.h"
+#include "pc/vision3d/controller_vision.h"  // the pad inventory row  // the hands status line
 
 // Widget mirrors, in menu units.
 static unsigned int sUiScale;    // game units per metre (a bigger world number = a smaller world)
@@ -105,6 +106,7 @@ static void vr_panel_push(UNUSED struct DjuiBase *caller) {
 
 static char sHandsStatus[64];
 static char sTexStatus[64];
+static char sPadStatus[128];
 
 // The hands status row is a readout, not a control.
 static void vr_panel_noop(UNUSED struct DjuiBase *caller) { }
@@ -193,6 +195,11 @@ void djui_panel_vr_create(struct DjuiBase *caller) {
                      sm64_gfx_texture_wraps());
             djui_button_create(body, sTexStatus, DJUI_BUTTON_STYLE_NORMAL, vr_panel_noop);
         }
+        // What GameController actually sees. Category "Spatial Controller"
+        // confirms the SpatialGamepad declaration took, and whether the old
+        // aggregate MFi device persists beside the pair.
+        sm64_vr_pad_status(sPadStatus, (int) sizeof(sPadStatus));
+        djui_button_create(body, sPadStatus, DJUI_BUTTON_STYLE_NORMAL, vr_panel_noop);
 
         // Comfort and image.
         djui_slider_create(body, "Stereo Depth", &sUiStereo, 0, 100, vr_panel_push);

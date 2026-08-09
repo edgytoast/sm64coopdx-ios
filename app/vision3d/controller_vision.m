@@ -173,6 +173,27 @@ static void vr_forget(GCController *c) {
     }
 }
 
+// The controller inventory, readable FROM INSIDE THE HEADSET. The element names
+// this reports are the thing every remaining decision needs — a native input
+// path was already shipped once on guessed names and broke Z and R — and the
+// person who can produce them is wearing a Vision Pro, not sitting at a Mac
+// console. So it goes in the VR panel.
+void sm64_vr_pad_status(char *buf, int len) {
+    if (buf == NULL || len <= 0) { return; }
+    NSArray<GCController *> *cs = GCController.controllers;
+    if (cs.count == 0) { snprintf(buf, (size_t) len, "Pads: none"); return; }
+    NSMutableString *s = [NSMutableString stringWithFormat:@"Pads: %lu", (unsigned long) cs.count];
+    for (GCController *c in cs) {
+        // "Spatial Controller" vs "MFi" is THE question: it says whether the
+        // SpatialGamepad declaration took effect, and whether the aggregate
+        // device persists beside the spatial pair.
+        [s appendFormat:@" [%@ %lub/%lud]", c.productCategory,
+            (unsigned long) c.physicalInputProfile.buttons.allKeys.count,
+            (unsigned long) c.physicalInputProfile.dpads.allKeys.count];
+    }
+    snprintf(buf, (size_t) len, "%s", s.UTF8String);
+}
+
 // ---------------------------------------------------------------------------
 // ControllerAPI
 // ---------------------------------------------------------------------------

@@ -35,6 +35,7 @@ static unsigned int sUiLookMode; // 0 Free, 1 Turn, 2 Snap
 static unsigned int sUiLookSens; // percent
 static bool sUiFlipCam;          // somersault the view with Mario
 static bool sUiHands;            // draw Mario's hands on your controllers
+static bool sUiInputNative;      // EXPERIMENTAL: fixed VR layout instead of SDL
 static unsigned int sUiHandSize; // percent of Mario's own hand geometry
 
 // DJUI sliders are unsigned, and the world can sit BELOW eye level (it usually
@@ -72,6 +73,7 @@ static void vr_panel_pull(void) {
     sUiLookSens  = (unsigned int) (sm64_3d_setting_f("vrLookSens", SM64_DEF_VRLOOKSENS) * 100.0f);
     sUiFlipCam   = sm64_3d_setting_f("vrFlipCam", SM64_DEF_VRFLIPCAM) > 0.5f;
     sUiHands     = sm64_3d_setting_f("vrHands", SM64_DEF_VRHANDS) > 0.5f;
+    sUiInputNative = sm64_3d_setting_f("vrInputNative", 0.0f) > 0.5f;
     sUiHandSize  = (unsigned int) (sm64_3d_setting_f("vrHandSize", SM64_DEF_VRHANDSIZE) * 100.0f);
 }
 
@@ -97,6 +99,7 @@ static void vr_panel_push(UNUSED struct DjuiBase *caller) {
     sm64_3d_setting_set_f("vrLookSens", (float) sUiLookSens / 100.0f);
     sm64_3d_setting_set_f("vrFlipCam", sUiFlipCam ? 1.0f : 0.0f);
     sm64_3d_setting_set_f("vrHands", sUiHands ? 1.0f : 0.0f);
+    sm64_3d_setting_set_f("vrInputNative", sUiInputNative ? 1.0f : 0.0f);
     sm64_3d_setting_set_f("vrHandSize", (float) sUiHandSize / 100.0f);
     if (sUiMsaa < (unsigned int) VR_MSAA_COUNT) {
         sm64_3d_setting_set_f("vrMsaa", (float) sMsaaSamples[sUiMsaa]);
@@ -128,6 +131,7 @@ static void vr_panel_reset(UNUSED struct DjuiBase *caller) {
     sm64_3d_setting_set_f("vrLookSens", SM64_DEF_VRLOOKSENS);
     sm64_3d_setting_set_f("vrFlipCam", SM64_DEF_VRFLIPCAM);
     sm64_3d_setting_set_f("vrHands", SM64_DEF_VRHANDS);
+    sm64_3d_setting_set_f("vrInputNative", 0.0f);
     sm64_3d_setting_set_f("vrHandSize", SM64_DEF_VRHANDSIZE);
     vr_panel_pull();
     sm64_3d_apply_settings();
@@ -181,6 +185,11 @@ void djui_panel_vr_create(struct DjuiBase *caller) {
         // question on this hardware rather than a given.
         djui_checkbox_create(body, "Show Mario Hands", &sUiHands, vr_panel_push);
         djui_slider_create(body, "Hand Size", &sUiHandSize, 30, 300, vr_panel_push);
+        // EXPERIMENTAL, default OFF. On: the Sense pair leaves SDL and is driven
+        // by the fixed VR layout. Reachable from the game's own menu on purpose —
+        // if it misbehaves you can turn it off from inside the headset, which is
+        // exactly what 1.1.2.22 left Austin unable to do.
+        djui_checkbox_create(body, "VR Controller Input (test)", &sUiInputNative, vr_panel_push);
         // Why there are no hands, readable from inside the headset. A button
         // purely because DJUI has no static-text row here; it does nothing.
         // Snapshot taken at panel creation, which is when you come looking.

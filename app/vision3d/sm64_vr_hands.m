@@ -113,8 +113,19 @@ static int  sPendingCount = 0;
 // Registration
 // ---------------------------------------------------------------------------
 API_AVAILABLE(visionos(26.0))
-static void hands_load_device(GCController *c) {
+static void hands_load_device_retry(GCController *c, int attempt);
+
+API_AVAILABLE(visionos(26.0))
+static void hands_load_device(GCController *c) { hands_load_device_retry(c, 0); }
+
+API_AVAILABLE(visionos(26.0))
+static void hands_load_device_retry(GCController *c, int attempt) {
     if (c == nil) { return; }
+    // Dedupe (Fable 2b): a device can arrive twice — once queued behind the
+    // authorization prompt and again from a later didConnect on a focus change.
+    for (int i = 0; i < sAccessoryCount; i++) {
+        if (sAccessoryDevice[i] == c) { return; }
+    }
     ar_accessory_load_from_device(c,
         ^(id<GCDevice> device, bool successful, ar_error_t error, ar_accessory_t accessory) {
             (void)device;
@@ -134,9 +145,20 @@ static void hands_load_device(GCController *c) {
                 }
                 sLoadFailCode = (int) code;
                 NSLog(@"[vrhands] accessory load FAILED for '%@' (category '%@') "
-                       "code=%ld desc=%@",
-                      c.vendorName, c.productCategory, code, desc ? (__bridge NSString *)desc : @"(none)");
+                       "code=%ld attempt=%d desc=%@",
+                      c.vendorName, c.productCategory, code, attempt,
+                      desc ? (__bridge NSString *)desc : @"(none)");
                 if (desc != NULL) { CFRelease(desc); }
+                // ONE retry, 2s later (Fable 2c): accessory tracking is gated on
+                // the app being focused, and a load issued during entry or a
+                // focus change can fail for that alone. Cheap insurance, and
+                // both results are logged so a retry cannot hide the first.
+                if (attempt == 0) {
+                    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)),
+                                   dispatch_get_main_queue(), ^{
+                        if (@available(visionOS 26.0, *)) { hands_load_device_retry(c, 1); }
+                    });
+                }
                 return;
             }
             if (sAccessoryCount >= SM64_VR_MAX_ACCESSORIES) {
@@ -367,8 +389,8 @@ void sm64_vr_hands_status(char *buf, int len) {
     } else if (sLoadOK == 0 && sLoadFail == 0) {
         snprintf(buf, (size_t) len, "Hands: allowed, no controller seen");
     } else if (sLoadOK == 0) {
-        snprintf(buf, (size_t) len, "Hands: allowed, %d not trackable (err %d)",
-                 sLoadFail, sLoadFailCode);
+        snprintf(buf, (size_t) len, "Hands: allowed, %d fail (err %d) of %d dev",
+                 sLoadFail, sLoadFailCode, sAccessoryCount + sLoadFail);
     } else {
         snprintf(buf, (size_t) len, "Hands: %d loaded, %d anchor(s), %s%s",
                  sLoadOK, sLastAnchorCount,

@@ -63,6 +63,7 @@
 #include "pc/vision3d/sm64_vr_spike.h"   // mode cycle, recenter, grab gate, chat
 #include "pc/vision3d/sm64_vr_hands.h"   // accessory poses (a separate question from input)
 #include "pc/utils/misc.h"               // clock_elapsed_f64: tap vs hold
+#include "pc/vision3d/sm64_vision_3d.h"  // sm64_3d_setting_f: the input-path toggle
 
 // Assigned by chirality once ARKit answers. Weak-ish by convention: the connect
 // notification owns the lifetime, and disconnect clears these.
@@ -97,11 +98,17 @@ static void vr_stick(GCController *c, NSString *name, float *outX, float *outY) 
 }
 
 static void vr_log_inventory(GCController *c) {
-    NSLog(@"[vrpad] controller '%@' category='%@' vendor='%@'",
-          c.productCategory, c.productCategory, c.vendorName);
+    // vendorName is also the chirality HEURISTIC: GameController has no chirality
+    // API at all (Fable grepped the framework), and Sony ships distinct left and
+    // right units, so the product string is the only synchronous hint that exists.
+    NSLog(@"[vrpad] controller vendor='%@' category='%@'", c.vendorName, c.productCategory);
     NSLog(@"[vrpad]   buttons: %@", c.physicalInputProfile.buttons.allKeys);
     NSLog(@"[vrpad]   axes:    %@", c.physicalInputProfile.axes.allKeys);
     NSLog(@"[vrpad]   dpads:   %@", c.physicalInputProfile.dpads.allKeys);
+    // Did the declaration actually survive CMake + Xcode plist processing into
+    // the built product? One line closes that doubt permanently (Fable 2e).
+    NSLog(@"[vrpad]   bundle GCSupportedGameControllers = %@",
+          [NSBundle.mainBundle objectForInfoDictionaryKey:@"GCSupportedGameControllers"]);
 }
 
 // ---------------------------------------------------------------------------
@@ -220,6 +227,37 @@ static s8 vr_to_stick(float v) {
     return (s8)s;
 }
 
+// Which backend owns the spatial pair. DEFAULT 0 = SDL, i.e. whatever is
+// currently working. Fable's process rule after 1.1.2.22, and the whole point:
+// a bad experiment must cost a toggle, not a device round. The SDL filter reads
+// this too, so both halves of the decision move together and can never disagree.
+int sm64_vr_input_native_enabled(void) {
+    return sm64_3d_setting_f("vrInputNative", 0.0f) > 0.5f;
+}
+
+// Name-agnostic fallbacks (Fable): a naming surprise should degrade, not kill
+// the pad. The constants are tried first; these find the element by shape.
+static GCControllerDirectionPad *vr_any_stick(GCController *c) {
+    if (c == nil) { return nil; }
+    GCPhysicalInputProfile *p = c.physicalInputProfile;
+    GCControllerDirectionPad *d = p.dpads[GCInputThumbstick];
+    if (d != nil) { return d; }
+    for (NSString *k in p.dpads.allKeys) { return p.dpads[k]; }  // first of any
+    return nil;
+}
+
+static bool vr_button_like(GCController *c, NSString *needle) {
+    if (c == nil) { return false; }
+    GCPhysicalInputProfile *p = c.physicalInputProfile;
+    for (NSString *k in p.buttons.allKeys) {
+        if ([k rangeOfString:needle options:NSCaseInsensitiveSearch].location != NSNotFound) {
+            GCControllerButtonInput *b = p.buttons[k];
+            if (b != nil && b.isPressed) { return true; }
+        }
+    }
+    return false;
+}
+
 static void controller_vision_read(OSContPad *pad) {
     // INPUT BELONGS TO SDL. FULL STOP, until this layout is proven on device.
     //
@@ -244,16 +282,16 @@ static void controller_vision_read(OSContPad *pad) {
     // and Fable's corrections: prefer GCControllerLiveInput, where the thumbstick
     // lives under `dpads` (not `axes`), and read analog triggers through
     // pressedInput.value.
-    (void)pad;
-    return;
+    if (!sm64_vr_input_native_enabled()) { (void)pad; return; }
 
-#if 0
     GCController *L = sHand[0], *R = sHand[1];
     if (L == nil && R == nil) { return; }   // nothing held: report nothing, hold nothing
 
     float lx, ly, rx, ry;
-    vr_stick(L, GCInputThumbstick, &lx, &ly);
-    vr_stick(R, GCInputThumbstick, &rx, &ry);
+    // The thumbstick is a DIRECTION PAD, which is why it lives under `dpads`.
+    GCControllerDirectionPad *ls = vr_any_stick(L), *rs = vr_any_stick(R);
+    lx = ls ? ls.xAxis.value : 0.0f; ly = ls ? ls.yAxis.value : 0.0f;
+    rx = rs ? rs.xAxis.value : 0.0f; ry = rs ? rs.yAxis.value : 0.0f;
 
     // MOVE. |= and max() rather than assignment, so a gamepad held in the other
     // hand still works — both feed one pad (donor precedent).
@@ -271,33 +309,29 @@ static void controller_vision_read(OSContPad *pad) {
     if (cx != 0) { pad->ext_stick_x = cx; }
     if (cy != 0) { pad->ext_stick_y = cy; }
 
-    // FACE BUTTONS. Tried under several aliases because a Sense is not an
-    // extendedGamepad and the first device run is what tells us its real names —
-    // the inventory log above is the instrument for that.
-    if (vr_button(R, GCInputButtonA) || vr_button(R, GCInputButtonB)) { pad->button |= A_BUTTON; }
-    if (vr_button(R, GCInputButtonX) || vr_button(R, GCInputButtonY)) { pad->button |= B_BUTTON; }
-    if (vr_button(L, GCInputButtonA) || vr_button(L, GCInputButtonX)) { pad->button |= B_BUTTON; }
+    // FACE BUTTONS. Real constants now (Fable, verified in the XROS 26.5 SDK's
+    // GCInputNames.h) rather than the guesses that cost Austin his Z and R.
+    if (vr_button(R, GCInputButtonA)) { pad->button |= A_BUTTON; }
+    if (vr_button(R, GCInputButtonB) || vr_button(L, GCInputButtonB)) { pad->button |= B_BUTTON; }
 
-    // TRIGGERS: left crouches (Z), right is R.
-    if (vr_axis(L, GCInputLeftTrigger)  > 0.6f || vr_button(L, GCInputLeftTrigger))  { pad->button |= Z_TRIG; }
-    if (vr_axis(L, GCInputRightTrigger) > 0.6f || vr_button(L, GCInputRightTrigger)) { pad->button |= Z_TRIG; }
-    if (vr_axis(R, GCInputLeftTrigger)  > 0.6f || vr_button(R, GCInputLeftTrigger))  { pad->button |= R_TRIG; }
-    if (vr_axis(R, GCInputRightTrigger) > 0.6f || vr_button(R, GCInputRightTrigger)) { pad->button |= R_TRIG; }
+    // TRIGGERS. GCInputTrigger is SINGULAR — each hand device carries one, so
+    // there is no Left/Right variant to try. Left hand crouches (Z), right is R.
+    // The analog value rides on the BUTTON element (pressedInput.value), which is
+    // why this reads buttons rather than axes.
+    if (vr_button(L, GCInputTrigger) || vr_button_like(L, @"Trigger")) { pad->button |= Z_TRIG; }
+    if (vr_button(R, GCInputTrigger) || vr_button_like(R, @"Trigger")) { pad->button |= R_TRIG; }
 
     // GRIPS -> grab/throw, GATED, and FIRST-PERSON ONLY. In third-person the
     // grips are just pad buttons and should stay that way (Austin: one of them
     // toggles camera zoom for him, "this is all correct").
     if (sm64_vr_first_person_active()) {
-        bool grip = vr_axis(L, GCInputLeftShoulder) > 0.6f || vr_button(L, GCInputLeftShoulder)
-                 || vr_axis(R, GCInputRightShoulder) > 0.6f || vr_button(R, GCInputRightShoulder)
-                 || vr_button(L, GCInputRightShoulder) || vr_button(R, GCInputLeftShoulder);
+        bool grip = vr_button(L, GCInputGripButton) || vr_button(R, GCInputGripButton)
+                 || vr_button_like(L, @"Grip") || vr_button_like(R, @"Grip");
         if (grip && sm64_vr_grabbable_in_reach()) { pad->button |= B_BUTTON; }
     }
 
     // LEFT STICK CLICK -> Z, the donor's second crouch.
-    if (vr_button(L, GCInputLeftThumbstickButton) || vr_button(L, GCInputRightThumbstickButton)) {
-        pad->button |= Z_TRIG;
-    }
+    if (vr_button(L, GCInputThumbstickButton)) { pad->button |= Z_TRIG; }
 
     // RIGHT STICK CLICK: tap cycles the view mode, hold recenters. Both are
     // things you want without opening a menu, and neither can collide with
@@ -306,7 +340,7 @@ static void controller_vision_read(OSContPad *pad) {
         static bool prev = false;
         static double downAt = 0.0;
         static bool held = false;
-        bool now = vr_button(R, GCInputRightThumbstickButton) || vr_button(R, GCInputLeftThumbstickButton);
+        bool now = vr_button(R, GCInputThumbstickButton);
         double t = clock_elapsed_f64();
         if (now && !prev) { downAt = t; held = false; }
         if (now && !held && (t - downAt) > 0.4) { held = true; sm64_vr_spike_recenter(); }
@@ -331,7 +365,6 @@ static void controller_vision_read(OSContPad *pad) {
         prev = now;
         if (startFrames > 0) { startFrames--; pad->button |= START_BUTTON; }
     }
-#endif // 0 — see the top of this function
 }
 
 // Per-hand haptics. The donor's burst pattern: short and sharp, because the

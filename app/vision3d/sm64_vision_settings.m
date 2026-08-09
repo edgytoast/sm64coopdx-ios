@@ -140,7 +140,7 @@ static __weak SM64SettingsVC *g_settingsVC = nil;
 - (void)viewDidLoad {
     [super viewDidLoad];
     g_settingsVC = self;
-    _sections = @[ @"Vision Pro 3D", @"VR mode (R0 spike)" ];
+    _sections = @[ @"Vision Pro 3D", @"VR mode" ];
     _rows = @[ @[
         mkrow(@"Screen Distance", @"dist", SM64_ROW_SLIDER, 1.0, 8.0, SM64_DEF_DIST),
         // Item 2: ranges WIDENED so the panel can go ultrawide / ultratall (the
@@ -181,11 +181,14 @@ static __weak SM64SettingsVC *g_settingsVC = nil;
         // does nothing visible — which is itself the answer worth having.
         mkrow(@"Show Mario Hands", @"vrHands", SM64_ROW_SWITCH, 0, 1, SM64_DEF_VRHANDS),
         mkrow(@"Hand Size", @"vrHandSize", SM64_ROW_SLIDER, 0.3, 3.0, SM64_DEF_VRHANDSIZE),
+        // 0 prim / 1 env / 2 shade / 3 lit. Walk these to find the one that
+        // renders his gloves rather than black blobs.
+        mkrow(@"Hand Style", @"vrHandStyle", SM64_ROW_SLIDER, 0, 3, SM64_DEF_VRHANDSTYLE),
         // EXPERIMENTAL, default OFF. On: the Sense pair is taken away from SDL
         // and driven by the fixed VR layout. Off: SDL drives it exactly as it
         // does today. This switch exists so a bad experiment costs a toggle
         // rather than a headset round — 1.1.2.22's lesson.
-        mkrow(@"VR Controller Input (test)", @"vrInputNative", SM64_ROW_SWITCH, 0, 1, 0),
+        mkrow(@"VR Controller Input", @"vrInputNative", SM64_ROW_SWITCH, 0, 1, SM64_DEF_VRINPUTNATIVE),
         mkrow(@"Antialiasing", @"vrMsaa", SM64_ROW_SLIDER, 1, 8, SM64_DEF_VRMSAA),
         // R0 SPIKE (throwaway). Stereo Strength is a COMFORT lever, not a fix for
         // doubling — 2026-08-07's device round settled that (0% doubled WORSE,
@@ -238,7 +241,7 @@ static __weak SM64SettingsVC *g_settingsVC = nil;
 - (void)resetVision3D {
     for (NSString *k in @[ @"dist", @"halfW", @"halfH", @"posH", @"sep", @"conv", @"convAuto", @"dim",
                            @"vrStereo", @"vrScale", @"vrDist", @"vrHeight", @"vrRender", @"vrDim", @"vrLock", @"vrLookMode", @"vrLookSens", @"vrFlipCam",
-                           @"vrHands", @"vrHandSize", @"vrInputNative" ]) {
+                           @"vrHands", @"vrHandSize", @"vrHandStyle", @"vrInputNative" ]) {
         [NSUserDefaults.standardUserDefaults
             removeObjectForKey:[@"sm64vp3d." stringByAppendingString:k]];
     }

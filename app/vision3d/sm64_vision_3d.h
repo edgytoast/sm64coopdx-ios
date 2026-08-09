@@ -254,6 +254,24 @@ void sm64_3d_apply_settings(void);
 // changes nothing on screen.
 #define SM64_DEF_VRHANDS     1.0f
 #define SM64_DEF_VRHANDSIZE  1.0f    // multiplier on Mario's own hand geometry
+// Who drives the Sense pair. ON by default as of 2026-08-08: declaring
+// SpatialGamepad removes the aggregate MFi device entirely, and SDL 2.32 —
+// which predates spatial controllers — can only open the two halves as raw
+// joysticks with alphabetically-mapped elements and no GUID mapping. On device
+// that meant no character movement at all until this was ticked. SDL is no
+// longer a working fallback for this hardware; it is only a way out if the
+// fixed layout misbehaves.
+#define SM64_DEF_VRINPUTNATIVE 1.0f
+
+// Hand material (charter R4). The hand display lists carry NO render state, so
+// something has to supply it, and getting it wrong fails SILENTLY as wrong
+// colour rather than as an error — Austin's first sighting was "black gaussian
+// circles". Rather than spend a device round per guess, this selects between
+// candidates so one round can find the right one:
+//   0 = flat primitive colour   1 = environment colour
+//   2 = vertex shade            3 = lit, with a plain white light (closest to
+//                                   how Mario is actually drawn)
+#define SM64_DEF_VRHANDSTYLE 3.0f
 #define SM64_DEF_VRMSAA      2.0f    // VR eye-pass MSAA. 2x by Austin's eye on device
                                      // (2026-08-07): "2x is good ... hard to see noticeable
                                      // improvement after that", and it is the cheapest rung.

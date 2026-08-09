@@ -549,6 +549,17 @@ extern const Gfx mario_right_hand_closed_dl[];
 
 static Gfx *sm64_gfx_hands_dl = NULL;   // built in gfx_run(), run in each eye
 
+// A plain white light for the lit hand style, built with the SDK's own
+// initializer (Lights1 holds Light/Ambient unions, so assigning Light_t and
+// Ambient_t members does not typecheck). Ambient is deliberately generous: a
+// hand held near your face is often turned away from any single light, and a
+// hand that goes black when you rotate your wrist reads as a bug rather than as
+// shading.
+static Lights1 sm64_vr_hand_lights =
+    gdSPDefLights1(120, 120, 120,       /* ambient  */
+                   255, 255, 255,       /* diffuse: white gloves */
+                   40, 40, 40);         /* direction */
+
 static Gfx *sm64_gfx_build_hands_dl(void) {
     if (!sm64_vr_hands_active()) { return NULL; }
 
@@ -557,21 +568,68 @@ static Gfx *sm64_gfx_build_hands_dl(void) {
     int haveR = sm64_vr_hand_matrix(SM64_VR_HAND_RIGHT, rm);
     if (!haveL && !haveR) { return NULL; }
 
-    Gfx *dl = alloc_display_list(24 * sizeof(Gfx));
+    Gfx *dl = alloc_display_list(32 * sizeof(Gfx));
     Mtx *persp = alloc_display_list(sizeof(Mtx));
     if (dl == NULL || persp == NULL) { return NULL; }
     u16 perspNorm;
     guPerspective(persp, &perspNorm, 45.0f, 1.0f, 10.0f, 20000.0f, 1.0f);
 
+    /* THE MATERIAL, and it is the whole remaining problem. Mario's hand display
+       lists carry vertices and triangles and NOTHING else — no combiner, no
+       geometry mode, no lights; the geo layout supplies all of it when he is
+       drawn normally, including ASM-node player-colour lights we would have to
+       reimplement. Getting it wrong fails SILENTLY as wrong colour, never as an
+       error, which is exactly how the first attempt reached Austin as "black
+       gaussian circles" (device, 2026-08-08).
+
+       So the material is SELECTABLE rather than guessed, and one device round can
+       walk the candidates instead of costing a round each. Culling is off for all
+       of them: a hand seen from the wrong side of its winding vanishes, and that
+       would read as a pose bug rather than a material one. */
+    const int style = (int) sm64_3d_setting_f("vrHandStyle", SM64_DEF_VRHANDSTYLE);
+
     Gfx *g = dl;
     gDPPipeSync(g++);
     gSPMatrix(g++, VIRTUAL_TO_PHYSICAL(persp), G_MTX_PROJECTION | G_MTX_LOAD | G_MTX_NOPUSH);
-    gSPClearGeometryMode(g++, G_LIGHTING | G_TEXTURE_GEN | G_TEXTURE_GEN_LINEAR);
-    gSPSetGeometryMode(g++, G_ZBUFFER | G_SHADE | G_CULL_BACK);
     gSPTexture(g++, 0xFFFF, 0xFFFF, 0, G_TX_RENDERTILE, G_OFF);
-    gDPSetCombineMode(g++, G_CC_PRIMITIVE, G_CC_PRIMITIVE);
-    gDPSetPrimColor(g++, 0, 0, 255, 255, 255, 255);   // Mario's white gloves
     gDPSetRenderMode(g++, G_RM_AA_ZB_OPA_SURF, G_RM_AA_ZB_OPA_SURF2);
+
+    if (style == 3) {
+        /* LIT — closest to how Mario is really drawn. His vertices carry NORMALS,
+           not colours, so this is the only style that uses them for what they are.
+           A plain white directional light stands in for the geo layout's
+           player-colour lights: the gloves read white, and the shading follows the
+           geometry the way the rest of him does. */
+        gSPSetGeometryMode(g++, G_ZBUFFER | G_LIGHTING | G_SHADING_SMOOTH);
+        gSPClearGeometryMode(g++, G_CULL_BOTH | G_TEXTURE_GEN | G_TEXTURE_GEN_LINEAR);
+        gSPSetLights1(g++, sm64_vr_hand_lights);
+        gDPSetCombineLERP(g++, 0, 0, 0, SHADE, 0, 0, 0, SHADE,
+                               0, 0, 0, SHADE, 0, 0, 0, SHADE);
+    } else if (style == 2) {
+        /* VERTEX SHADE with lighting OFF. The documented trap: with G_LIGHTING
+           clear, the normal bytes are reinterpreted as vertex COLOURS. Kept as a
+           candidate precisely so we can see what that looks like rather than
+           reason about it. */
+        gSPClearGeometryMode(g++, G_LIGHTING | G_CULL_BOTH | G_TEXTURE_GEN | G_TEXTURE_GEN_LINEAR);
+        gSPSetGeometryMode(g++, G_ZBUFFER | G_SHADE | G_SHADING_SMOOTH);
+        gDPSetCombineLERP(g++, 0, 0, 0, SHADE, 0, 0, 0, SHADE,
+                               0, 0, 0, SHADE, 0, 0, 0, SHADE);
+    } else if (style == 1) {
+        /* FLAT ENVIRONMENT COLOUR. */
+        gSPClearGeometryMode(g++, G_LIGHTING | G_CULL_BOTH | G_TEXTURE_GEN | G_TEXTURE_GEN_LINEAR);
+        gSPSetGeometryMode(g++, G_ZBUFFER);
+        gDPSetCombineLERP(g++, 0, 0, 0, ENVIRONMENT, 0, 0, 0, ENVIRONMENT,
+                               0, 0, 0, ENVIRONMENT, 0, 0, 0, ENVIRONMENT);
+        gDPSetEnvColor(g++, 255, 255, 255, 255);
+    } else {
+        /* FLAT PRIMITIVE COLOUR — the original attempt, kept so the comparison is
+           honest and so a regression is recognisable. */
+        gSPClearGeometryMode(g++, G_LIGHTING | G_CULL_BOTH | G_TEXTURE_GEN | G_TEXTURE_GEN_LINEAR);
+        gSPSetGeometryMode(g++, G_ZBUFFER);
+        gDPSetCombineLERP(g++, 0, 0, 0, PRIMITIVE, 0, 0, 0, PRIMITIVE,
+                               0, 0, 0, PRIMITIVE, 0, 0, 0, PRIMITIVE);
+        gDPSetPrimColor(g++, 0, 0, 255, 255, 255, 255);
+    }
 
     for (int hand = 0; hand < 2; hand++) {
         if (hand == SM64_VR_HAND_LEFT  && !haveL) { continue; }

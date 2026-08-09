@@ -123,7 +123,7 @@ WHAT IS NOT TOUCHED
 
 --- /dev/null
 +++ b/src/pc/vision3d/sm64_vision_3d.h
-@@ -0,0 +1,266 @@
+@@ -0,0 +1,284 @@
 +#ifndef SM64_VISION_3D_H
 +#define SM64_VISION_3D_H
 +
@@ -380,6 +380,24 @@ WHAT IS NOT TOUCHED
 +// changes nothing on screen.
 +#define SM64_DEF_VRHANDS     1.0f
 +#define SM64_DEF_VRHANDSIZE  1.0f    // multiplier on Mario's own hand geometry
++// Who drives the Sense pair. ON by default as of 2026-08-08: declaring
++// SpatialGamepad removes the aggregate MFi device entirely, and SDL 2.32 —
++// which predates spatial controllers — can only open the two halves as raw
++// joysticks with alphabetically-mapped elements and no GUID mapping. On device
++// that meant no character movement at all until this was ticked. SDL is no
++// longer a working fallback for this hardware; it is only a way out if the
++// fixed layout misbehaves.
++#define SM64_DEF_VRINPUTNATIVE 1.0f
++
++// Hand material (charter R4). The hand display lists carry NO render state, so
++// something has to supply it, and getting it wrong fails SILENTLY as wrong
++// colour rather than as an error — Austin's first sighting was "black gaussian
++// circles". Rather than spend a device round per guess, this selects between
++// candidates so one round can find the right one:
++//   0 = flat primitive colour   1 = environment colour
++//   2 = vertex shade            3 = lit, with a plain white light (closest to
++//                                   how Mario is actually drawn)
++#define SM64_DEF_VRHANDSTYLE 3.0f
 +#define SM64_DEF_VRMSAA      2.0f    // VR eye-pass MSAA. 2x by Austin's eye on device
 +                                     // (2026-08-07): "2x is good ... hard to see noticeable
 +                                     // improvement after that", and it is the cheapest rung.
@@ -2133,7 +2151,7 @@ WHAT IS NOT TOUCHED
 +#endif // SM64_VISION_3D
 --- /dev/null
 +++ b/src/pc/vision3d/sm64_vision_settings.m
-@@ -0,0 +1,411 @@
+@@ -0,0 +1,414 @@
 +// sm64_vision_settings.m — the "Vision Pro 3D" settings table.
 +//
 +// Ported from vkQuake-ios ios/shell/ios_settings.m's "Vision Pro 3D" section,
@@ -2276,7 +2294,7 @@ WHAT IS NOT TOUCHED
 +- (void)viewDidLoad {
 +    [super viewDidLoad];
 +    g_settingsVC = self;
-+    _sections = @[ @"Vision Pro 3D", @"VR mode (R0 spike)" ];
++    _sections = @[ @"Vision Pro 3D", @"VR mode" ];
 +    _rows = @[ @[
 +        mkrow(@"Screen Distance", @"dist", SM64_ROW_SLIDER, 1.0, 8.0, SM64_DEF_DIST),
 +        // Item 2: ranges WIDENED so the panel can go ultrawide / ultratall (the
@@ -2317,11 +2335,14 @@ WHAT IS NOT TOUCHED
 +        // does nothing visible — which is itself the answer worth having.
 +        mkrow(@"Show Mario Hands", @"vrHands", SM64_ROW_SWITCH, 0, 1, SM64_DEF_VRHANDS),
 +        mkrow(@"Hand Size", @"vrHandSize", SM64_ROW_SLIDER, 0.3, 3.0, SM64_DEF_VRHANDSIZE),
++        // 0 prim / 1 env / 2 shade / 3 lit. Walk these to find the one that
++        // renders his gloves rather than black blobs.
++        mkrow(@"Hand Style", @"vrHandStyle", SM64_ROW_SLIDER, 0, 3, SM64_DEF_VRHANDSTYLE),
 +        // EXPERIMENTAL, default OFF. On: the Sense pair is taken away from SDL
 +        // and driven by the fixed VR layout. Off: SDL drives it exactly as it
 +        // does today. This switch exists so a bad experiment costs a toggle
 +        // rather than a headset round — 1.1.2.22's lesson.
-+        mkrow(@"VR Controller Input (test)", @"vrInputNative", SM64_ROW_SWITCH, 0, 1, 0),
++        mkrow(@"VR Controller Input", @"vrInputNative", SM64_ROW_SWITCH, 0, 1, SM64_DEF_VRINPUTNATIVE),
 +        mkrow(@"Antialiasing", @"vrMsaa", SM64_ROW_SLIDER, 1, 8, SM64_DEF_VRMSAA),
 +        // R0 SPIKE (throwaway). Stereo Strength is a COMFORT lever, not a fix for
 +        // doubling — 2026-08-07's device round settled that (0% doubled WORSE,
@@ -2374,7 +2395,7 @@ WHAT IS NOT TOUCHED
 +- (void)resetVision3D {
 +    for (NSString *k in @[ @"dist", @"halfW", @"halfH", @"posH", @"sep", @"conv", @"convAuto", @"dim",
 +                           @"vrStereo", @"vrScale", @"vrDist", @"vrHeight", @"vrRender", @"vrDim", @"vrLock", @"vrLookMode", @"vrLookSens", @"vrFlipCam",
-+                           @"vrHands", @"vrHandSize", @"vrInputNative" ]) {
++                           @"vrHands", @"vrHandSize", @"vrHandStyle", @"vrInputNative" ]) {
 +        [NSUserDefaults.standardUserDefaults
 +            removeObjectForKey:[@"sm64vp3d." stringByAppendingString:k]];
 +    }
@@ -4377,7 +4398,7 @@ WHAT IS NOT TOUCHED
 +#endif // DJUI_PANEL_VR_H
 --- /dev/null
 +++ b/src/pc/vision3d/djui_panel_vr.c
-@@ -0,0 +1,233 @@
+@@ -0,0 +1,238 @@
 +// djui_panel_vr.c — the in-game VR options panel (Options -> VR).
 +//
 +// See djui_panel_vr.h for why this exists and what belongs here rather than in
@@ -4417,6 +4438,7 @@ WHAT IS NOT TOUCHED
 +static bool sUiHands;            // draw Mario's hands on your controllers
 +static bool sUiInputNative;      // EXPERIMENTAL: fixed VR layout instead of SDL
 +static unsigned int sUiHandSize; // percent of Mario's own hand geometry
++static unsigned int sUiHandStyle; // 0 prim, 1 env, 2 shade, 3 lit
 +
 +// DJUI sliders are unsigned, and the world can sit BELOW eye level (it usually
 +// should — you look down at a diorama), so the height row carries a bias.
@@ -4453,8 +4475,9 @@ WHAT IS NOT TOUCHED
 +    sUiLookSens  = (unsigned int) (sm64_3d_setting_f("vrLookSens", SM64_DEF_VRLOOKSENS) * 100.0f);
 +    sUiFlipCam   = sm64_3d_setting_f("vrFlipCam", SM64_DEF_VRFLIPCAM) > 0.5f;
 +    sUiHands     = sm64_3d_setting_f("vrHands", SM64_DEF_VRHANDS) > 0.5f;
-+    sUiInputNative = sm64_3d_setting_f("vrInputNative", 0.0f) > 0.5f;
++    sUiInputNative = sm64_3d_setting_f("vrInputNative", SM64_DEF_VRINPUTNATIVE) > 0.5f;
 +    sUiHandSize  = (unsigned int) (sm64_3d_setting_f("vrHandSize", SM64_DEF_VRHANDSIZE) * 100.0f);
++    sUiHandStyle = (unsigned int) sm64_3d_setting_f("vrHandStyle", SM64_DEF_VRHANDSTYLE);
 +}
 +
 +// Switching modes restores that mode's own numbers, so the sliders below have to
@@ -4481,6 +4504,7 @@ WHAT IS NOT TOUCHED
 +    sm64_3d_setting_set_f("vrHands", sUiHands ? 1.0f : 0.0f);
 +    sm64_3d_setting_set_f("vrInputNative", sUiInputNative ? 1.0f : 0.0f);
 +    sm64_3d_setting_set_f("vrHandSize", (float) sUiHandSize / 100.0f);
++    sm64_3d_setting_set_f("vrHandStyle", (float) sUiHandStyle);
 +    if (sUiMsaa < (unsigned int) VR_MSAA_COUNT) {
 +        sm64_3d_setting_set_f("vrMsaa", (float) sMsaaSamples[sUiMsaa]);
 +    }
@@ -4511,8 +4535,9 @@ WHAT IS NOT TOUCHED
 +    sm64_3d_setting_set_f("vrLookSens", SM64_DEF_VRLOOKSENS);
 +    sm64_3d_setting_set_f("vrFlipCam", SM64_DEF_VRFLIPCAM);
 +    sm64_3d_setting_set_f("vrHands", SM64_DEF_VRHANDS);
-+    sm64_3d_setting_set_f("vrInputNative", 0.0f);
++    sm64_3d_setting_set_f("vrInputNative", SM64_DEF_VRINPUTNATIVE);
 +    sm64_3d_setting_set_f("vrHandSize", SM64_DEF_VRHANDSIZE);
++    sm64_3d_setting_set_f("vrHandStyle", SM64_DEF_VRHANDSTYLE);
 +    vr_panel_pull();
 +    sm64_3d_apply_settings();
 +    // No panel rebuild: DJUI sliders read *value when they RENDER
@@ -4565,11 +4590,12 @@ WHAT IS NOT TOUCHED
 +        // question on this hardware rather than a given.
 +        djui_checkbox_create(body, "Show Mario Hands", &sUiHands, vr_panel_push);
 +        djui_slider_create(body, "Hand Size", &sUiHandSize, 30, 300, vr_panel_push);
++        djui_slider_create(body, "Hand Style", &sUiHandStyle, 0, 3, vr_panel_push);
 +        // EXPERIMENTAL, default OFF. On: the Sense pair leaves SDL and is driven
 +        // by the fixed VR layout. Reachable from the game's own menu on purpose —
 +        // if it misbehaves you can turn it off from inside the headset, which is
 +        // exactly what 1.1.2.22 left Austin unable to do.
-+        djui_checkbox_create(body, "VR Controller Input (test)", &sUiInputNative, vr_panel_push);
++        djui_checkbox_create(body, "VR Controller Input", &sUiInputNative, vr_panel_push);
 +        // Why there are no hands, readable from inside the headset. A button
 +        // purely because DJUI has no static-text row here; it does nothing.
 +        // Snapshot taken at panel creation, which is when you come looking.
@@ -5367,7 +5393,7 @@ WHAT IS NOT TOUCHED
 +// a bad experiment must cost a toggle, not a device round. The SDL filter reads
 +// this too, so both halves of the decision move together and can never disagree.
 +int sm64_vr_input_native_enabled(void) {
-+    return sm64_3d_setting_f("vrInputNative", 0.0f) > 0.5f;
++    return sm64_3d_setting_f("vrInputNative", SM64_DEF_VRINPUTNATIVE) > 0.5f;
 +}
 +
 +// Name-agnostic fallbacks (Fable): a naming surprise should degrade, not kill
@@ -6273,12 +6299,10 @@ WHAT IS NOT TOUCHED
      rsp.modelview_matrix_stack_size = 1;
      rsp.current_num_lights = 2;
      rsp.lights_changed = true;
-@@ -2076,7 +2303,89 @@
- 
- struct GfxRenderingAPI *gfx_get_current_rendering_api(void) {
+@@ -2078,6 +2305,146 @@
      return gfx_rapi;
-+}
-+
+ }
+ 
 +#ifdef SM64_VISION_3D
 +// The tail of gfx_run(), split out so the both-eyes path can run it twice.
 +static void gfx_run_eye(Gfx *commands);
@@ -6319,6 +6343,17 @@ WHAT IS NOT TOUCHED
 +
 +static Gfx *sm64_gfx_hands_dl = NULL;   // built in gfx_run(), run in each eye
 +
++// A plain white light for the lit hand style, built with the SDK's own
++// initializer (Lights1 holds Light/Ambient unions, so assigning Light_t and
++// Ambient_t members does not typecheck). Ambient is deliberately generous: a
++// hand held near your face is often turned away from any single light, and a
++// hand that goes black when you rotate your wrist reads as a bug rather than as
++// shading.
++static Lights1 sm64_vr_hand_lights =
++    gdSPDefLights1(120, 120, 120,       /* ambient  */
++                   255, 255, 255,       /* diffuse: white gloves */
++                   40, 40, 40);         /* direction */
++
 +static Gfx *sm64_gfx_build_hands_dl(void) {
 +    if (!sm64_vr_hands_active()) { return NULL; }
 +
@@ -6327,21 +6362,68 @@ WHAT IS NOT TOUCHED
 +    int haveR = sm64_vr_hand_matrix(SM64_VR_HAND_RIGHT, rm);
 +    if (!haveL && !haveR) { return NULL; }
 +
-+    Gfx *dl = alloc_display_list(24 * sizeof(Gfx));
++    Gfx *dl = alloc_display_list(32 * sizeof(Gfx));
 +    Mtx *persp = alloc_display_list(sizeof(Mtx));
 +    if (dl == NULL || persp == NULL) { return NULL; }
 +    u16 perspNorm;
 +    guPerspective(persp, &perspNorm, 45.0f, 1.0f, 10.0f, 20000.0f, 1.0f);
 +
++    /* THE MATERIAL, and it is the whole remaining problem. Mario's hand display
++       lists carry vertices and triangles and NOTHING else — no combiner, no
++       geometry mode, no lights; the geo layout supplies all of it when he is
++       drawn normally, including ASM-node player-colour lights we would have to
++       reimplement. Getting it wrong fails SILENTLY as wrong colour, never as an
++       error, which is exactly how the first attempt reached Austin as "black
++       gaussian circles" (device, 2026-08-08).
++
++       So the material is SELECTABLE rather than guessed, and one device round can
++       walk the candidates instead of costing a round each. Culling is off for all
++       of them: a hand seen from the wrong side of its winding vanishes, and that
++       would read as a pose bug rather than a material one. */
++    const int style = (int) sm64_3d_setting_f("vrHandStyle", SM64_DEF_VRHANDSTYLE);
++
 +    Gfx *g = dl;
 +    gDPPipeSync(g++);
 +    gSPMatrix(g++, VIRTUAL_TO_PHYSICAL(persp), G_MTX_PROJECTION | G_MTX_LOAD | G_MTX_NOPUSH);
-+    gSPClearGeometryMode(g++, G_LIGHTING | G_TEXTURE_GEN | G_TEXTURE_GEN_LINEAR);
-+    gSPSetGeometryMode(g++, G_ZBUFFER | G_SHADE | G_CULL_BACK);
 +    gSPTexture(g++, 0xFFFF, 0xFFFF, 0, G_TX_RENDERTILE, G_OFF);
-+    gDPSetCombineMode(g++, G_CC_PRIMITIVE, G_CC_PRIMITIVE);
-+    gDPSetPrimColor(g++, 0, 0, 255, 255, 255, 255);   // Mario's white gloves
 +    gDPSetRenderMode(g++, G_RM_AA_ZB_OPA_SURF, G_RM_AA_ZB_OPA_SURF2);
++
++    if (style == 3) {
++        /* LIT — closest to how Mario is really drawn. His vertices carry NORMALS,
++           not colours, so this is the only style that uses them for what they are.
++           A plain white directional light stands in for the geo layout's
++           player-colour lights: the gloves read white, and the shading follows the
++           geometry the way the rest of him does. */
++        gSPSetGeometryMode(g++, G_ZBUFFER | G_LIGHTING | G_SHADING_SMOOTH);
++        gSPClearGeometryMode(g++, G_CULL_BOTH | G_TEXTURE_GEN | G_TEXTURE_GEN_LINEAR);
++        gSPSetLights1(g++, sm64_vr_hand_lights);
++        gDPSetCombineLERP(g++, 0, 0, 0, SHADE, 0, 0, 0, SHADE,
++                               0, 0, 0, SHADE, 0, 0, 0, SHADE);
++    } else if (style == 2) {
++        /* VERTEX SHADE with lighting OFF. The documented trap: with G_LIGHTING
++           clear, the normal bytes are reinterpreted as vertex COLOURS. Kept as a
++           candidate precisely so we can see what that looks like rather than
++           reason about it. */
++        gSPClearGeometryMode(g++, G_LIGHTING | G_CULL_BOTH | G_TEXTURE_GEN | G_TEXTURE_GEN_LINEAR);
++        gSPSetGeometryMode(g++, G_ZBUFFER | G_SHADE | G_SHADING_SMOOTH);
++        gDPSetCombineLERP(g++, 0, 0, 0, SHADE, 0, 0, 0, SHADE,
++                               0, 0, 0, SHADE, 0, 0, 0, SHADE);
++    } else if (style == 1) {
++        /* FLAT ENVIRONMENT COLOUR. */
++        gSPClearGeometryMode(g++, G_LIGHTING | G_CULL_BOTH | G_TEXTURE_GEN | G_TEXTURE_GEN_LINEAR);
++        gSPSetGeometryMode(g++, G_ZBUFFER);
++        gDPSetCombineLERP(g++, 0, 0, 0, ENVIRONMENT, 0, 0, 0, ENVIRONMENT,
++                               0, 0, 0, ENVIRONMENT, 0, 0, 0, ENVIRONMENT);
++        gDPSetEnvColor(g++, 255, 255, 255, 255);
++    } else {
++        /* FLAT PRIMITIVE COLOUR — the original attempt, kept so the comparison is
++           honest and so a regression is recognisable. */
++        gSPClearGeometryMode(g++, G_LIGHTING | G_CULL_BOTH | G_TEXTURE_GEN | G_TEXTURE_GEN_LINEAR);
++        gSPSetGeometryMode(g++, G_ZBUFFER);
++        gDPSetCombineLERP(g++, 0, 0, 0, PRIMITIVE, 0, 0, 0, PRIMITIVE,
++                               0, 0, 0, PRIMITIVE, 0, 0, 0, PRIMITIVE);
++        gDPSetPrimColor(g++, 0, 0, 255, 255, 255, 255);
++    }
 +
 +    for (int hand = 0; hand < 2; hand++) {
 +        if (hand == SM64_VR_HAND_LEFT  && !haveL) { continue; }
@@ -6358,12 +6440,13 @@ WHAT IS NOT TOUCHED
 +    gDPPipeSync(g++);
 +    gSPEndDisplayList(g);
 +    return dl;
- }
++}
 +#endif
- 
++
  void gfx_start_frame(void) {
      if (gGfxPcResetTex1 > 0) {
-@@ -2086,6 +2395,21 @@
+         gGfxPcResetTex1--;
+@@ -2086,6 +2453,21 @@
      }
      gfx_wapi->handle_events();
      gfx_wapi->get_dimensions(&gfx_current_dimensions.width, &gfx_current_dimensions.height);
@@ -6385,7 +6468,7 @@ WHAT IS NOT TOUCHED
      if (gfx_current_dimensions.height == 0) {
          // Avoid division by zero
          gfx_current_dimensions.height = 1;
-@@ -2100,6 +2424,46 @@
+@@ -2100,6 +2482,46 @@
  }
  
  void gfx_run(Gfx *commands) {
@@ -6432,7 +6515,7 @@ WHAT IS NOT TOUCHED
      gfx_sp_reset();
  
      sHasInverseCameraMatrix = false;
-@@ -2115,6 +2479,9 @@
+@@ -2115,6 +2537,9 @@
      //double t0 = gfx_wapi->get_time();
      gfx_rapi->start_frame();
      gfx_run_dl(commands);
@@ -6442,7 +6525,7 @@ WHAT IS NOT TOUCHED
  }
  
  void gfx_end_frame_render(void) {
-@@ -2458,6 +2825,21 @@
+@@ -2458,6 +2883,21 @@
  void OPTIMIZE_O3 ext_gfx_run_dl(Gfx* cmd) {
      uint32_t opcode = cmd->words.w0 >> 24;
      switch (opcode) {

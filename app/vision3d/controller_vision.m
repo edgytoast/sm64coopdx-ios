@@ -232,7 +232,7 @@ static s8 vr_to_stick(float v) {
 // a bad experiment must cost a toggle, not a device round. The SDL filter reads
 // this too, so both halves of the decision move together and can never disagree.
 int sm64_vr_input_native_enabled(void) {
-    return sm64_3d_setting_f("vrInputNative", 0.0f) > 0.5f;
+    return sm64_3d_setting_f("vrInputNative", SM64_DEF_VRINPUTNATIVE) > 0.5f;
 }
 
 // Name-agnostic fallbacks (Fable): a naming surprise should degrade, not kill

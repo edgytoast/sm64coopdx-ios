@@ -5075,7 +5075,7 @@ WHAT IS NOT TOUCHED
 +#endif // SM64_VISION_3D
 --- /dev/null
 +++ b/src/pc/vision3d/sm64_vr_presets.c
-@@ -0,0 +1,150 @@
+@@ -0,0 +1,155 @@
 +// sm64_vr_presets.c — VR view modes (charter R2, donor vr.c:1493-1556).
 +//
 +// A "mode" is just a remembered set of placement numbers, and the donor's design
@@ -5120,14 +5120,19 @@ WHAT IS NOT TOUCHED
 +//                level is around you and Mario is a foot tall.
 +//   First-person LIFE SIZE: Mario is ~160 units and about 1.6 m, so 100 units to
 +//                the metre is 1:1, and the game's own first-person camera puts
-+//                the viewpoint at his head. Distance and height are zero because
-+//                in this mode the anchor IS your eye — see the placement note in
++//                the viewpoint at his head. Distance stays zero because in this
++//                mode the anchor IS your eye — see the placement note in
 +//                sm64_vr_spike.m about why FP tracks the live head instead of
-+//                staying anchored in the room.
++//                staying anchored in the room. HEIGHT is -1.6 (Austin, device
++//                2026-08-09): the game's camera sits at Mario's eye, but the
++//                placement anchor is the FLOOR of the room, so the world has to
++//                drop by a standing eye height for his eye to land on yours.
++//                1.6 m because that is what Mario is — the same number that
++//                makes 100 units to the metre life size in the first place.
 +static const SM64VrPreset sPresets[] = {
 +    { "Diorama",      2200.0f,  0.55f, -0.60f, false },
 +    { "Third-person",  900.0f, -0.15f, -0.10f, false },
-+    { "First-person",  100.0f,  0.00f,  0.00f, true  },
++    { "First-person",  100.0f,  0.00f, -1.60f, true  },
 +};
 +#define SM64_VR_PRESET_COUNT ((int)(sizeof(sPresets) / sizeof(sPresets[0])))
 +

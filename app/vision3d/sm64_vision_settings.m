@@ -26,6 +26,7 @@
 //     explicitly specifies "% of default".
 
 #import "sm64_vision_host.h"
+#import "sm64_vr_spike.h"   // R0 SPIKE (throwaway): the VR world rows
 
 #ifdef SM64_VISION_3D
 
@@ -69,7 +70,7 @@ static BOOL sm64_use_feet(void) {
 
 // Human-readable value text, honouring the m/ft toggle.
 static NSString *sm64_value_text(NSString *key, float v) {
-    if ([key isEqualToString:@"dim"]) {
+    if ([key isEqualToString:@"dim"] || [key isEqualToString:@"vrDim"]) {
         // Surroundings Dimming is a 0..100% control.
         return [NSString stringWithFormat:@"%.0f%%", v * 100.0f];
     }
@@ -90,9 +91,35 @@ static NSString *sm64_value_text(NSString *key, float v) {
         return sm64_use_feet() ? [NSString stringWithFormat:@"%.1f ft", full * 3.28084f]
                                : [NSString stringWithFormat:@"%.2f m", full];
     }
-    if ([key isEqualToString:@"dist"] || [key isEqualToString:@"posH"]) {
+    if ([key isEqualToString:@"dist"] || [key isEqualToString:@"posH"] ||
+        [key isEqualToString:@"vrDist"] || [key isEqualToString:@"vrHeight"]) {
         return sm64_use_feet() ? [NSString stringWithFormat:@"%.1f ft", v * 3.28084f]
                                : [NSString stringWithFormat:@"%.2f m", v];
+    }
+    // R0 SPIKE rows. Stereo reads as a % of the true IPD (the donor's lever);
+    // World Scale reads as the metres the world's ~8000-unit span becomes, which
+    // is the number a human can actually picture.
+    if ([key isEqualToString:@"vrStereo"]) {
+        return [NSString stringWithFormat:@"%.0f%% IPD", v * 100.0f];
+    }
+    if ([key isEqualToString:@"vrLookSens"]) {
+        return [NSString stringWithFormat:@"%.0f%%", v * 100.0f];
+    }
+    if ([key isEqualToString:@"vrMsaa"]) {
+        return (v < 1.5f) ? @"Off" : [NSString stringWithFormat:@"%.0fx", v];
+    }
+    if ([key isEqualToString:@"vrRender"]) {
+        // Report the real texture, not the slider: "measure, don't infer".
+        int rw = 0, rh = 0;
+        if (sm64_vr_spike_render_size(&rw, &rh)) {
+            return [NSString stringWithFormat:@"%.0f%% (%dp)", v * 100.0f, rh];
+        }
+        return [NSString stringWithFormat:@"%.0f%%", v * 100.0f];
+    }
+    if ([key isEqualToString:@"vrScale"]) {
+        float span = (v > 1.0f) ? (8000.0f / v) : 0.0f;
+        return sm64_use_feet() ? [NSString stringWithFormat:@"%.0f ft world", span * 3.28084f]
+                               : [NSString stringWithFormat:@"%.1f m world", span];
     }
     return [NSString stringWithFormat:@"%.2f", v];
 }
@@ -113,7 +140,7 @@ static __weak SM64SettingsVC *g_settingsVC = nil;
 - (void)viewDidLoad {
     [super viewDidLoad];
     g_settingsVC = self;
-    _sections = @[ @"Vision Pro 3D" ];
+    _sections = @[ @"Vision Pro 3D", @"VR mode" ];
     _rows = @[ @[
         mkrow(@"Screen Distance", @"dist", SM64_ROW_SLIDER, 1.0, 8.0, SM64_DEF_DIST),
         // Item 2: ranges WIDENED so the panel can go ultrawide / ultratall (the
@@ -141,11 +168,83 @@ static __weak SM64SettingsVC *g_settingsVC = nil;
         mkrow(@"Aspect Ratio", @"infoAspect", SM64_ROW_INFO, 0, 0, 0),
         mkrow(@"Units", @"units", SM64_ROW_SEG, 0, 1, SM64_DEF_UNITS),
         mkrow(@"Recenter Screen", @"recenter", SM64_ROW_BUTTON, 0, 0, 0),
+    ], @[
+        // PARITY with the in-game panel (Austin, 2026-08-08: "I am leaning that we
+        // just exactly replicate each other"). Same store, same rows, either
+        // menu — the only difference is where you happen to be standing.
+        mkrow(@"VR Mode", @"vrPreset", SM64_ROW_SEG, 0, 2, 0),
+        mkrow(@"Stick Look", @"vrLookMode", SM64_ROW_SEG, 0, 2, SM64_DEF_VRLOOKMODE),
+        mkrow(@"Look Sensitivity", @"vrLookSens", SM64_ROW_SLIDER, 0.2, 3.0, SM64_DEF_VRLOOKSENS),
+        mkrow(@"Flip Cam (intense)", @"vrFlipCam", SM64_ROW_SWITCH, 0, 1, SM64_DEF_VRFLIPCAM),
+        // Charter R4. Draws only in first-person and only while a controller is
+        // actually pose-tracked, so on hardware that cannot be tracked this row
+        // does nothing visible — which is itself the answer worth having.
+        mkrow(@"Show Mario Hands", @"vrHands", SM64_ROW_SWITCH, 0, 1, SM64_DEF_VRHANDS),
+        mkrow(@"Hand Size", @"vrHandSize", SM64_ROW_SLIDER, 1, 20, SM64_DEF_VRHANDSIZE),
+        // 0 prim / 1 env / 2 shade / 3 lit. Walk these to find the one that
+        // renders his gloves rather than black blobs.
+        // Orientation, in degrees. Mario's hand mesh and ARKit's held-controller
+        // axes do not agree and the correction is not derivable from either side,
+        // so it is dialled rather than guessed.
+        // Position, metres, in the hand's own frame.
+        mkrow(@"Grab With Hands", @"vrGestureGrab", SM64_ROW_SWITCH, 0, 1, SM64_DEF_VRGESTUREGRAB),
+        mkrow(@"Punch With Hands", @"vrGesturePunch", SM64_ROW_SWITCH, 0, 1, SM64_DEF_VRGESTUREPUNCH),
+        mkrow(@"Punch Sensitivity", @"vrPunchSpeed", SM64_ROW_SLIDER, 0.5, 4.0, SM64_DEF_VRPUNCHSPEED),
+        // EXPERIMENTAL, default OFF. On: the Sense pair is taken away from SDL
+        // and driven by the fixed VR layout. Off: SDL drives it exactly as it
+        // does today. This switch exists so a bad experiment costs a toggle
+        // rather than a headset round — 1.1.2.22's lesson.
+        mkrow(@"Antialiasing", @"vrMsaa", SM64_ROW_SLIDER, 1, 8, SM64_DEF_VRMSAA),
+        // R0 SPIKE (throwaway). Stereo Strength is a COMFORT lever, not a fix for
+        // doubling — 2026-08-07's device round settled that (0% doubled WORSE,
+        // which is impossible when each eye's frustum matches its rotation). It
+        // is still the fastest diagnostic in the sheet: at 0% the image must go
+        // FLAT BUT SINGLE, and if it does not, the frustum/rotation pairing is
+        // still wrong and nothing downstream is worth tuning.
+        // Sharpness. The flat panel supersamples 2.7x; VR spreads the same
+        // pixels over the whole field of view, so below 1.0 this upsamples
+        // and the engine (which has no MSAA) shows every jagged edge.
+        mkrow(@"Render Scale", @"vrRender", SM64_ROW_SLIDER, 0.4, 1.2, SM64_DEF_VRRENDER),
+        mkrow(@"Stereo Strength", @"vrStereo", SM64_ROW_SLIDER, 0.0, 1.0, SM64_DEF_VRSTEREO),
+        mkrow(@"World Scale", @"vrScale", SM64_ROW_SLIDER, 300.0, 6000.0, SM64_DEF_VRSCALE),
+        mkrow(@"World Distance", @"vrDist", SM64_ROW_SLIDER, 0.3, 3.0, SM64_DEF_VRDIST),
+        mkrow(@"World Height", @"vrHeight", SM64_ROW_SLIDER, -1.5, 0.5, SM64_DEF_VRHEIGHT),
+        // "Full VR" is deliberately NOT a button any more (Austin: that name
+        // should mean first-person immersion, not "the room is hidden").
+        // Hiding the room is just this slider at 100%, which is the default.
+        mkrow(@"Surroundings Dimming", @"vrDim", SM64_ROW_SLIDER, 0.0, 1.0, SM64_DEF_VRDIM),
+        mkrow(@"World Lock", @"vrLock", SM64_ROW_SWITCH, 0, 1, SM64_DEF_VRWORLDLOCK),
+        mkrow(@"Recenter VR World", @"vrRecenter", SM64_ROW_BUTTON, 0, 0, 0),
     ] ];
 }
 
 - (NSInteger)numberOfSectionsInTableView:(UITableView *)t { return _sections.count; }
-- (NSInteger)tableView:(UITableView *)t numberOfRowsInSection:(NSInteger)s { return _rows[s].count; }
+// The hand-placement rows only mean anything while hands are ON, and there are
+// ten of them — left alone they bury every other VR setting under controls that
+// do nothing. Filtered out of the visible model rather than disabled, so the
+// section genuinely collapses (Austin, 2026-08-09).
+static BOOL sm64_row_is_hand_detail(SM64Row *r) {
+    static NSSet *keys = nil;
+    if (keys == nil) {
+        keys = [NSSet setWithArray:@[ @"vrHandSize", @"vrGestureGrab",
+                                      @"vrGesturePunch", @"vrPunchSpeed" ]];
+    }
+    return [keys containsObject:r.key];
+}
+
+- (NSArray<SM64Row *> *)visibleRowsInSection:(NSInteger)s {
+    BOOL handsOn = sm64_3d_setting_f("vrHands", SM64_DEF_VRHANDS) > 0.5f;
+    if (handsOn) { return _rows[s]; }
+    NSMutableArray *out = [NSMutableArray array];
+    for (SM64Row *r in _rows[s]) {
+        if (!sm64_row_is_hand_detail(r)) { [out addObject:r]; }
+    }
+    return out;
+}
+
+- (NSInteger)tableView:(UITableView *)t numberOfRowsInSection:(NSInteger)s {
+    return [self visibleRowsInSection:s].count;
+}
 
 // Custom header views get a COMPRESSED height without an explicit delegate,
 // which shoves the title up under the sheet's own Settings bar.
@@ -169,17 +268,40 @@ static __weak SM64SettingsVC *g_settingsVC = nil;
     return hv;
 }
 
+// RESET IS SCOPED TO THE MODE YOU ARE IN (Austin, device 2026-08-09: hitting
+// Reset in first-person VR was wiping the world scale, distance and height and
+// dumping him out of a usable first-person view until he re-picked the mode).
+//
+// A single global reset was always wrong here: the panel settings and the VR
+// settings describe two different ways of playing, and the VR placement numbers
+// additionally belong to the ACTIVE view mode rather than to VR generally. So
+// placement goes back through sm64_vr_preset_reset_current(), which restores
+// *this mode as it shipped* instead of some average of all three.
 - (void)resetVision3D {
-    for (NSString *k in @[ @"dist", @"halfW", @"halfH", @"posH", @"sep", @"conv", @"convAuto", @"dim" ]) {
+    NSArray<NSString *> *keys;
+    if (sm64_vr_spike_running) {
+        // In VR: leave every flat-panel/stereo key alone, and leave the per-mode
+        // placement to the preset table below.
+        keys = @[ @"vrStereo", @"vrRender", @"vrDim", @"vrLock",
+                  @"vrLookMode", @"vrLookSens", @"vrFlipCam", @"vrMsaa",
+                  @"vrHands", @"vrHandSize", @"vrGestureGrab", @"vrGesturePunch",
+                  @"vrPunchSpeed" ];
+    } else {
+        // On the flat panel: only the panel's own settings.
+        keys = @[ @"dist", @"halfW", @"halfH", @"posH", @"sep", @"conv",
+                  @"convAuto", @"dim" ];
+    }
+    for (NSString *k in keys) {
         [NSUserDefaults.standardUserDefaults
             removeObjectForKey:[@"sm64vp3d." stringByAppendingString:k]];
     }
+    if (sm64_vr_spike_running) { sm64_vr_preset_reset_current(); }
     sm64_3d_apply_settings();
     [self.tableView reloadData];
 }
 
 - (UITableViewCell *)tableView:(UITableView *)t cellForRowAtIndexPath:(NSIndexPath *)ip {
-    SM64Row *r = _rows[ip.section][ip.row];
+    SM64Row *r = [self visibleRowsInSection:ip.section][ip.row];
     UITableViewCell *c = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault
                                                 reuseIdentifier:nil];
     c.textLabel.text = r.title;
@@ -192,8 +314,20 @@ static __weak SM64SettingsVC *g_settingsVC = nil;
         return c;
     }
     if (r.type == SM64_ROW_SEG) {
-        UISegmentedControl *seg = [[UISegmentedControl alloc] initWithItems:@[ @"m", @"ft" ]];
-        seg.selectedSegmentIndex = v > 0.5f ? 1 : 0;
+        NSArray *items = @[ @"m", @"ft" ];
+        if ([r.key isEqualToString:@"vrLookMode"]) { items = @[ @"Free", @"Turn", @"Snap" ]; }
+        if ([r.key isEqualToString:@"vrPreset"]) {
+            NSMutableArray *modes = [NSMutableArray array];
+            for (int i = 0; i < sm64_vr_preset_count(); i++) {
+                [modes addObject:[NSString stringWithUTF8String:sm64_vr_preset_name(i)]];
+            }
+            items = modes;
+        }
+        UISegmentedControl *seg = [[UISegmentedControl alloc] initWithItems:items];
+        // Austin, 2026-08-08: picking First-person worked but the control stayed
+        // on Third-person. This line was the m/ft rule — fine for two segments,
+        // wrong for three, and it silently clamped every mode above the first.
+        seg.selectedSegmentIndex = (items.count > 2) ? (NSInteger)v : (v > 0.5f ? 1 : 0);
         tag_ctl(seg, r);
         [seg addTarget:self action:@selector(segChanged:) forControlEvents:UIControlEventValueChanged];
         c.accessoryView = seg;
@@ -262,17 +396,33 @@ static __weak SM64SettingsVC *g_settingsVC = nil;
 }
 
 - (void)tableView:(UITableView *)t didSelectRowAtIndexPath:(NSIndexPath *)ip {
-    SM64Row *r = _rows[ip.section][ip.row];
+    SM64Row *r = [self visibleRowsInSection:ip.section][ip.row];
     if (r.type != SM64_ROW_BUTTON) { return; }
     [t deselectRowAtIndexPath:ip animated:YES];
     if ([r.key isEqualToString:@"recenter"]) {
         sm64_3d_recenter();
         NSLog(@"[sm64vp] settings: recenter requested");
+    } else if ([r.key isEqualToString:@"vrRecenter"]) {
+        sm64_vr_spike_recenter();
+        NSLog(@"[vrspike] settings: VR world recenter requested");
     }
 }
 
 - (void)segChanged:(UISegmentedControl *)seg {
-    sm64_3d_setting_set_f(ctl_row(seg).key.UTF8String, seg.selectedSegmentIndex > 0 ? 1.0f : 0.0f);
+    SM64Row *r = ctl_row(seg);
+    if ([r.key isEqualToString:@"vrLookMode"]) {
+        sm64_3d_setting_set_f(r.key.UTF8String, (float)seg.selectedSegmentIndex);
+        sm64_3d_apply_settings();
+        return;
+    }
+    if ([r.key isEqualToString:@"vrPreset"]) {
+        // Switching modes loads that mode's own placement, so the rows below
+        // have to be re-read — same reason the in-game panel re-pulls.
+        sm64_vr_preset_apply((int)seg.selectedSegmentIndex);
+        [self.tableView reloadData];
+        return;
+    }
+    sm64_3d_setting_set_f(r.key.UTF8String, seg.selectedSegmentIndex > 0 ? 1.0f : 0.0f);
     [self.tableView reloadData]; // every value label changes with the units
 }
 
@@ -283,6 +433,8 @@ static __weak SM64SettingsVC *g_settingsVC = nil;
     // Item 6: toggling Auto changes whether the Focus Distance slider is enabled
     // and what value it shows — reload so that row reflects it immediately.
     if ([r.key isEqualToString:@"convAuto"]) { [self.tableView reloadData]; }
+    // Show Mario Hands adds or removes ten placement rows beneath it.
+    if ([r.key isEqualToString:@"vrHands"]) { [self.tableView reloadData]; }
 }
 
 - (void)sliderChanged:(UISlider *)sl {

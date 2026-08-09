@@ -34,6 +34,7 @@
 //   - this thread has no runloop autorelease pool; drain per-frame ObjC garbage.
 
 #import "sm64_vision_3d.h"
+#import "sm64_vr_spike.h"   // R0 SPIKE (throwaway): VR eye sizing
 
 #ifdef SM64_VISION_3D
 
@@ -140,6 +141,20 @@ void sm64_3d_set_height(float h) {
 // stops, not every pixel of travel.
 #define SM64_SSAA_CAP 1.4f
 void sm64_3d_get_render_target_size(int *w, int *h) {
+    // R0 SPIKE / VR: the VR path sizes its eye textures from the compositor's
+    // per-eye VIEW, not from this panel budget — the panel's 3840x2160 was never
+    // meant to cover a whole field of view, and spreading it there is what makes
+    // VR look jagged next to the panel (0.53x vertical sampling vs the panel's
+    // 2.7x supersample). Both gfx_metal and gfx_pc size from THIS function, so
+    // overriding here keeps them in agreement exactly as before.
+    {
+        int vw = 0, vh = 0;
+        if (sm64_vr_spike_render_size(&vw, &vh)) {
+            if (w) { *w = vw; }
+            if (h) { *h = vh; }
+            return;
+        }
+    }
     float aspect = (sm64_screenHalfH > 0.01f) ? (sm64_screenHalfW / sm64_screenHalfH)
                                               : (16.0f / 9.0f);
     if (!(aspect > 0.02f && aspect < 50.0f)) { aspect = 16.0f / 9.0f; }
@@ -574,6 +589,12 @@ static void sm64_pace_signal(void) {
     pthread_cond_signal(&sm64_pace_cond);
     pthread_mutex_unlock(&sm64_pace_mtx);
 }
+
+// R0 SPIKE (throwaway): the VR probe loop is a SECOND compositor loop, and the
+// engine's wait below does not care which loop releases it — only that something
+// does, once per compositor frame. Without this the VR loop leaves the engine on
+// the 50 ms timeout path (~20 Hz into a 90 Hz compositor).
+void sm64_3d_pace_signal_now(void) { sm64_pace_signal(); }
 
 bool sm64_3d_wait_for_compositor_frame(void) {
     struct timespec ts;

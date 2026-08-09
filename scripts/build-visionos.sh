@@ -33,7 +33,7 @@ TEAM="${SM64_IOS_TEAM:-57G8J46Z2T}"
 #   - OTA-only local dev builds (iterating with no GitHub release) get a FOURTH
 #     component: 1.1.2.1, 1.1.2.2, ... They stay OTA-only until one is worth
 #     releasing, at which point it becomes the next public 3-component version.
-MARKETING_VERSION="${SM64_MARKETING_VERSION:-1.1.2}"
+MARKETING_VERSION="${SM64_MARKETING_VERSION:-1.2.0}"
 # BUILD number (CFBundleVersion) — churns per build, DISTINCT from the marketing
 # version, so many test builds can iterate under one pinned marketing version.
 # Monotonic default = git commit count; override with SM64_BUILD_NUMBER for
@@ -114,6 +114,17 @@ cmake --no-warn-unused-cli -S "$VENDOR" -B "$BUILD" -GXcode \
     "-DSM64_VISIONOS_ASSETS=$ROOT/app/ios/Assets-visionos.xcassets" \
     "-DCMAKE_PROJECT_sm64coopdx_INCLUDE=$ROOT/app/vision3d/vision3d.cmake" \
     "-DSM64_SDL2_VISIONOS_PATCH=$ROOT/overlay/assets/sdl2-visionos-compat.patch"
+
+# publish-vision-ota.sh's `xcodebuild archive` leaves Release-xros/sm64coopdx.app
+# behind as a SYMLINK into the archive's InstallationBuildProductsLocation, which
+# Xcode then deletes with the archive intermediates. The next ordinary build dies
+# on `mkdir -p` of that dangling link with the thoroughly unhelpful "unable to
+# create directory". So every build after a publish failed until the link was
+# cleared by hand. Clear it here, and ONLY when it is genuinely dangling.
+if [[ -L "$BUILD/Release-xros/sm64coopdx.app" && ! -e "$BUILD/Release-xros/sm64coopdx.app" ]]; then
+    echo "clearing dangling archive symlink at Release-xros/sm64coopdx.app"
+    rm "$BUILD/Release-xros/sm64coopdx.app"
+fi
 
 cmake --build "$BUILD" --config Release --target sm64coopdx --parallel 12 \
     -- -allowProvisioningUpdates

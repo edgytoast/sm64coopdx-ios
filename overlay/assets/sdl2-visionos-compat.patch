@@ -637,3 +637,38 @@ index 0e0ea05..7f9953d 100644
      }
  
      /* Integer truncation of fractional values matches SDL_uikitmetalview and
+diff --git a/src/joystick/iphoneos/SDL_mfijoystick.m b/src/joystick/iphoneos/SDL_mfijoystick.m
+index 6ff8e0e..2369bc4 100644
+--- a/src/joystick/iphoneos/SDL_mfijoystick.m
++++ b/src/joystick/iphoneos/SDL_mfijoystick.m
+@@ -350,6 +350,30 @@ static BOOL ElementAlreadyHandled(SDL_JoystickDeviceItem *device, NSString *elem
+ 
+ static BOOL IOS_AddMFIJoystickDevice(SDL_JoystickDeviceItem *device, GCController *controller)
+ {
++#if TARGET_OS_XR || (defined(__XROS__) && __XROS__)
++    /* visionOS: hand spatial controllers to the native backend — BUT ONLY WHEN
++     * IT IS TURNED ON (sm64coopdx overlay).
++     *
++     * SDL 2.32 predates spatial controllers, so its generic
++     * ENABLE_PHYSICAL_INPUT_PROFILE branch opens each half of a PSVR2 Sense pair
++     * as a raw joystick with elements auto-mapped in alphabetical order and no
++     * GameController mapping for that GUID — half-pads, randomly handed, which
++     * cannot tell left-stick-moves from right-stick-camera.
++     *
++     * The runtime gate is the lesson from 1.1.2.22, where filtering here in the
++     * same build that enabled an unproven native layout left the game with NO
++     * working input and no way back from inside the headset. Both halves of the
++     * decision now read ONE setting, so they can never disagree, and the default
++     * leaves SDL in charge. */
++    if (@available(visionOS 26.0, *)) {
++        extern int sm64_vr_input_native_enabled(void);
++        NSString *cat = controller.productCategory;
++        if (sm64_vr_input_native_enabled() && cat != nil &&
++            [cat isEqualToString:@"Spatial Controller"]) {
++            return SDL_FALSE;
++        }
++    }
++#endif
+     Uint16 vendor = 0;
+     Uint16 product = 0;
+     Uint8 subtype = 0;

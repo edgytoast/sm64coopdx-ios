@@ -1,9 +1,9 @@
 # Super Mario 64 Co-op Deluxe for Apple Vision Pro
 
 Play **Super Mario 64 Co-op Deluxe** on your Apple Vision Pro — the full game,
-online co-op, and a stereoscopic **3D mode** that puts Mario on a world-locked
-screen floating in your room with real depth. 100% vibe coded with lots of passion
-and attention to detail.
+online co-op, a stereoscopic **3D mode** on a world-locked screen in your room,
+and a **VR mode** you can stand inside. 100% vibe coded with lots of passion and
+attention to detail.
 
 Built on [sm64coopdx](https://github.com/coop-deluxe/sm64coopdx) (the Coop Deluxe
 Team's online-multiplayer Super Mario 64 port), rendering natively on **Metal**.
@@ -48,8 +48,9 @@ swap ROMs.
 - The **full Super Mario 64 campaign**, rendered natively on Metal
 - **Online co-op** — join or host over [CoopNet](https://github.com/coop-deluxe/coopnet);
   the whole reason coopdx exists, running on Vision Pro
-- **Game controllers** — plays great with any paired gamepad; on-screen touch controls
-  appear automatically when no controller is connected (gaze-and-pinch the menus)
+- **Game controllers** — plays great with any paired gamepad, in every mode including
+  VR; on-screen touch controls appear automatically when no controller is connected
+  (gaze-and-pinch the menus)
 - Character models, palettes, and the coopdx menus and settings, all in-app and persistent
 - **60 / 90 / 120 Hz** — auto-detects your headset's panel (M5 Vision Pro runs up to 120)
 - **The 3D mode** — the game on a world-locked stereoscopic panel floating in your room
@@ -62,6 +63,16 @@ swap ROMs.
     or tall) and it re-renders at true widescreen FOV rather than stretching Mario
   - **Surroundings dimming** and a **recenter** button
   - The 2D window parks as a small control card while you're in 3D, and restores when you exit
+- **VR mode** — the game in true stereo around you, in three view modes: a
+  **diorama** on your floor, **third-person** with the world at your shoulder, and
+  **first-person** at life size with a real sky dome. Each remembers its own scale
+  and placement.
+  - Plays with any gamepad. **Tracked VR controllers** (visionOS spatial
+    controllers, e.g. PSVR2 Sense) are optional, and draw **Mario's hands** where
+    yours are — with grab and punch gestures if you want them.
+  - Free / Turn / Snap stick look, stereo strength, world scale and height,
+    dimming, recenter, and an optional Flip Cam that somersaults with Mario.
+  - Menus and the act/star select stay on a flat world-locked screen.
 
 ## Requirements
 
@@ -110,6 +121,9 @@ Metal backend and the visionOS shell live under `app/`.
 
 - [sm64coopdx](https://github.com/coop-deluxe/sm64coopdx) by the **Coop Deluxe Team**,
   continuing [sm64ex-coop](https://github.com/djoslin0/sm64ex-coop) by **djoslin0**
+- VR mode owes its shape to [RaYRoD's Quest port of sm64coopdx](https://github.com/RaYRoD-TV/sm64coopdx-vr).
+  The sky dome is a direct port, tuning constants and all, along with the flip-cam,
+  first-person and VR-controller-layout lessons from their debugging notes.
 - iOS groundwork by [LeoManrique](https://github.com/LeoManrique/sm64coopdx-ios)
 - Super Mario 64 © Nintendo. This project ships **no** Nintendo content; you supply your
   own ROM. Matching upstream sm64coopdx, no separate license is asserted over the port.

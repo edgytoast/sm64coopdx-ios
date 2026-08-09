@@ -28,6 +28,7 @@
 //     loop calls ON the main thread, so it needs no queue at all.
 
 #import "sm64_vision_host.h"
+#import "sm64_vr_spike.h"   // R0 SPIKE (throwaway)
 
 #ifdef SM64_VISION_3D
 
@@ -95,6 +96,15 @@ void sm64_3d_apply_settings(void) {
                            conv,
                            sm64_3d_setting_f("hud", SM64_DEF_HUD));
     sm64_3d_set_dim(sm64_3d_setting_f("dim", SM64_DEF_DIM));
+    // R0 SPIKE (throwaway): the VR world placement, live while dragging.
+    sm64_vr_spike_set_tunables(sm64_3d_setting_f("vrScale", SM64_DEF_VRSCALE),
+                               sm64_3d_setting_f("vrDist", SM64_DEF_VRDIST),
+                               sm64_3d_setting_f("vrHeight", SM64_DEF_VRHEIGHT),
+                               sm64_3d_setting_f("vrStereo", SM64_DEF_VRSTEREO));
+    sm64_vr_spike_set_render_scale(sm64_3d_setting_f("vrRender", SM64_DEF_VRRENDER));
+    sm64_vr_spike_set_world_lock((int)(sm64_3d_setting_f("vrLock", SM64_DEF_VRWORLDLOCK) > 0.5f));
+    sm64_vr_spike_set_dim(sm64_3d_setting_f("vrDim", SM64_DEF_VRDIM));
+    gfx_metal_set_msaa((int)sm64_3d_setting_f("vrMsaa", SM64_DEF_VRMSAA));
 }
 
 // ---------------------------------------------------------------------------
@@ -145,6 +155,70 @@ static void SM64_AdoptSDLWindowIntoScene(void) {
 // the SDL patch, untouched), and fires SDL's viewDidLayoutSubviews so the engine
 // picks up the new render size. This is the SDL2 counterpart to the geometry
 // tracking SDL3 gets from being scene-aware; SDL2 predates scenes entirely.
+// THE SQUARE CORNERS (Fable round 3, confirmed 2026-08-09).
+//
+// visionOS applies its rounded-corner treatment PER WINDOW, to windows the
+// system manages — not to the composited scene output. The proof is the symptom
+// itself: if the mask were applied to the flattened scene, opaque content in the
+// corners could never square them, because the mask would clip our window's
+// corners exactly as it clips the primary's. "Rounded until the second window
+// paints, square after" is only possible with per-window masking.
+//
+// And our SDL window is not a window the system manages. SDL2 predates scenes
+// entirely, so its UIWindow is created scene-less and adopted (above) as a
+// SECONDARY window in the SwiftUI scene; the tracker below then stretches it,
+// opaque and Metal-backed, across the FULL scene bounds — including the corners
+// the system rounds on the primary. Nothing we did wrong: this was latent in the
+// two-window graft from the day it was written, and the corners go square at the
+// exact moment the game loop first runs this function.
+//
+// The fix is to wear the same corners the primary wears, READ FROM IT rather
+// than hardcoded, so a resize (or a future OS that varies the radius with window
+// size) is followed for free. The fallback exists only for the case where the
+// system rounds via a mechanism invisible to the process.
+#define SM64_WIN_CORNER_FALLBACK 46.0
+
+static void SM64_MirrorWindowCorners(UIWindow *win, UIWindowScene *scene) {
+    UIWindow *primary = nil;
+    for (UIWindow *w in scene.windows) {
+        if (w == win) { continue; }
+        primary = w;
+        if (w.isKeyWindow) { break; }   // prefer the key window if there are several
+    }
+
+    CGFloat r = primary ? primary.layer.cornerRadius : 0.0;
+    CALayerCornerCurve curve = primary ? primary.layer.cornerCurve : kCACornerCurveContinuous;
+    if (r <= 0.0) {
+        // The primary reports no radius of its own, so the rounding happens
+        // somewhere we cannot read. Wear a stand-in rather than nothing.
+        r = SM64_WIN_CORNER_FALLBACK;
+        curve = kCACornerCurveContinuous;
+    }
+    if (win.layer.cornerRadius != r) {
+        win.layer.cornerRadius = r;
+        win.layer.cornerCurve = curve;
+        win.layer.masksToBounds = YES;
+        NSLog(@"[sm64vp] window corners: radius %.1f curve %@ (primary %@)",
+              (double)r, curve, primary ? @"read" : @"absent — using fallback");
+    }
+}
+
+// One-shot inventory of every window in the scene, ~2 s in. Confirms the
+// mechanism and says which branch above is live, in the same build as the fix.
+static void SM64_LogWindowInventory(UIWindowScene *scene, UIWindow *ours) {
+    static bool logged = false;
+    if (logged) { return; }
+    logged = true;
+    for (UIWindow *w in scene.windows) {
+        NSLog(@"[sm64vp] window %@ %@ level=%.0f frame=%@ radius=%.1f curve=%@ "
+               "masks=%d mask=%@",
+              (w == ours) ? @"[SDL]" : @"[other]", NSStringFromClass(w.class),
+              (double)w.windowLevel, NSStringFromCGRect(w.frame),
+              (double)w.layer.cornerRadius, w.layer.cornerCurve,
+              w.layer.masksToBounds, w.layer.mask ? @"yes" : @"nil");
+    }
+}
+
 static void SM64_TrackSDLWindowToScene(void) {
     UIView *view = (__bridge UIView *)sm64_metal_get_sdl_uiview();
     UIWindow *win = view.window;
@@ -155,6 +229,14 @@ static void SM64_TrackSDLWindowToScene(void) {
         NSLog(@"[sm64vp] window resize: frame %@ -> scene bounds %@",
               NSStringFromCGRect(win.frame), NSStringFromCGRect(b));
         win.frame = b;
+    }
+    // Re-asserted beside the frame, and for the same reason: this window sits
+    // outside UIKit's automatic scene handling, so anything the system would
+    // have done for it has to be done here.
+    SM64_MirrorWindowCorners(win, scene);
+    {
+        static int frames = 0;
+        if (++frames == 120) { SM64_LogWindowInventory(scene, win); }
     }
 }
 
@@ -280,6 +362,72 @@ void sm64_3d_frame_poll(void) {
         }
     }
 
+    // Charter A5: classify this frame on the ENGINE thread (this hook IS the
+    // game loop's thread), so the compositor never reads game state.
+    // OUTSIDE the VR gate on purpose: this is what turns the game's own
+    // first-person camera back OFF when VR exits. Gated, it simply stopped
+    // running and left the camera asserted. Its disable direction is
+    // change-only, so a player who turned on coopdx's first-person for
+    // themselves on the flat panel keeps it.
+    sm64_vr_sync_first_person();
+
+    if (sm64_vr_spike_variant != 0) {
+        sm64_vr_spike_set_panel_mode(sm64_vr_frame_is_nongameplay() ? 1 : 0);
+        sm64_vr_poll_hotkeys();     // d-pad up cycles the view mode
+        sm64_vr_anticlip_resolve(); // level collision keeps the view out of walls
+        sm64_vr_sync_look_mode();    // leaving Free levels the pitch (Turn/Snap yaw only)
+        sm64_vr_update_flip_cam();   // somersault the view with Mario, if enabled
+    }
+
+    // R0 SPIKE (throwaway): arm the console bridge on the DEVICE. The bridge is
+    // launch-gated on SM64_CONSOLE (impossible from SpringBoard) or the presence
+    // of Documents/console_enabled.txt, so creating that file here means the
+    // NEXT launch is readable over the tailnet — which is the only way to get
+    // the IPD CHECK and CONTRACT dumps off the headset without asking Austin to
+    // go fishing in the Files app. Dies with the spike.
+    if (frames == 120) {
+        NSString *docs = [NSSearchPathForDirectoriesInDomains(
+            NSDocumentDirectory, NSUserDomainMask, YES) firstObject];
+        NSString *marker = [docs stringByAppendingPathComponent:@"console_enabled.txt"];
+        if (docs && ![NSFileManager.defaultManager fileExistsAtPath:marker]) {
+            [@"VR R0 spike: enables the port-8791 console bridge on the next launch.\n"
+                writeToFile:marker atomically:YES encoding:NSUTF8StringEncoding error:NULL];
+            NSLog(@"[vrspike] armed the console bridge for the next launch (%@)", marker);
+        }
+    }
+
+    // R0 SPIKE harness (throwaway). SM64_VR_SPIKE=<variant> opens one of the
+    // three probe spaces <SM64_VR_SPIKE_AT or 8> seconds after boot, and
+    // SM64_VR_SPIKE_FOR=<seconds> exits again. Same channel and the same reason
+    // as AUTOENTER above: the ornament needs a gaze-pinch that idb cannot drive,
+    // and verification that cannot be driven is verification that does not
+    // happen. Absent => no effect whatsoever.
+    {
+        static bool spike_entered = false, spike_exited = false;
+        static double spike_at = -1.0;
+        const char *sp = getenv("SM64_VR_SPIKE");
+        if (sp && *sp) {
+            double now = (double)frames / 120.0; // coarse; only a delay is needed
+            if (spike_at < 0.0) {
+                const char *at = getenv("SM64_VR_SPIKE_AT");
+                spike_at = (at && *at) ? atof(at) : 8.0;
+                if (spike_at <= 0.0) { spike_at = 8.0; }
+            }
+            if (!spike_entered && now >= spike_at) {
+                spike_entered = true;
+                NSLog(@"[vrspike] harness: entering variant %d", atoi(sp));
+                sm64_vr_spike_enter(atoi(sp));
+            }
+            const char *forS = getenv("SM64_VR_SPIKE_FOR");
+            if (spike_entered && !spike_exited && forS && *forS &&
+                now >= spike_at + atof(forS)) {
+                spike_exited = true;
+                NSLog(@"[vrspike] harness: exiting");
+                sm64_vr_spike_enter(0);
+            }
+        }
+    }
+
     // Harness: auto-EXIT N seconds after entering, so the parked-window RESTORE
     // path is verifiable headlessly (the Exit ornament needs a gaze-pinch, which
     // idb ui cannot drive on this simulator). Env-gated; absent => no effect.
@@ -336,7 +484,7 @@ static void SM64_SetCurtain(bool show) {
         sm64_curtain.backgroundColor = UIColor.blackColor;
         sm64_curtain.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
         UILabel *l = [UILabel new];
-        l.text = @"Playing in 3D";
+        l.text = (sm64_vr_spike_variant != 0) ? @"Playing in VR" : @"Playing in 3D";
         l.numberOfLines = 0;
         l.textAlignment = NSTextAlignmentCenter;
         l.textColor = [UIColor colorWithWhite:0.75 alpha:1.0];
@@ -405,6 +553,63 @@ void sm64_3d_enter(bool on) {
         NSLog(@"[sm64vp] Enter3D(0): render thread stopped=%d", !sm64_3d_imm_running);
         sm64_3d_on = 0;
         SM64_SetImmersiveMode(false); // sm64_3d_exit_finalize runs after the dismiss
+    }
+}
+
+// ---------------------------------------------------------------------------
+// R0 SPIKE (throwaway — VR-CHARTER §5 R0.1). Enter/exit one of the three VR
+// probe spaces. Deliberately reuses sm64_3d_enter's sequencing VERBATIM in
+// shape: capture the pre-3D scene size, push settings, engine offscreen FIRST,
+// curtain, then ask SwiftUI to open. The offscreen-first order is not optional
+// here — .full certainly hides the 2D window, and a hidden window's
+// nextDrawable never returns (a hang, not a glitch).
+//
+// It shares sm64_3d_on with the 3D path on purpose: sm64_3d_park_window and
+// sm64_3d_exit_finalize both gate on it, and the spike wants exactly the same
+// park/restore behaviour rather than a second copy of it.
+// ---------------------------------------------------------------------------
+extern void SM64_SetVRSpikeMode(int variant); // SM64VisionApp.swift (@_cdecl)
+
+void sm64_vr_spike_enter(int variant) {
+    if (!sm64_booted) {
+        NSLog(@"[vrspike] enter(%d) ignored pre-boot", variant);
+        return;
+    }
+    if (variant == sm64_vr_spike_variant) { return; }
+
+    if (variant != 0) {
+        if (sm64_3d_on) {
+            NSLog(@"[vrspike] enter(%d) refused — the 3D space is open", variant);
+            return;
+        }
+        {
+            UIView *view = (__bridge UIView *)sm64_metal_get_sdl_uiview();
+            UIWindowScene *scene = view.window.windowScene;
+            if (scene) {
+                CGSize sz = scene.coordinateSpace.bounds.size;
+                if (sz.width > 600.0 && sm64_pre3d_scene_size.width == 0.0) {
+                    sm64_pre3d_scene_size = sz;
+                }
+            }
+        }
+        // Push the stored settings BEFORE the first VR frame, exactly as the 3D
+        // path does. Without this, entering VR used whatever the C statics
+        // happened to hold and a tuned value only took effect once a slider was
+        // touched — which also meant MSAA was never applied at all.
+        sm64_3d_apply_settings();
+        sm64_vr_spike_variant = variant;
+        sm64_3d_on = 1;
+        sm64_metal_set_3d_mode(1);
+        SM64_SetCurtain(true);
+        SM64_SetVRSpikeMode(variant);
+        NSLog(@"[vrspike] entry committed (variant=%d)", variant);
+    } else {
+        sm64_vr_spike_stop = 1;
+        for (int i = 0; i < 200 && sm64_vr_spike_running; i++) { usleep(10 * 1000); } // <= 2 s
+        NSLog(@"[vrspike] exit: render thread stopped=%d", !sm64_vr_spike_running);
+        sm64_vr_spike_variant = 0;
+        sm64_3d_on = 0;
+        SM64_SetVRSpikeMode(0);
     }
 }
 

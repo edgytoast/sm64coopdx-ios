@@ -45,6 +45,9 @@
 #define SM64_DEF_DIM      0.8f
 #define SM64_DEF_UNITS    1.0f    // 0 = metres, 1 = feet
 
+// (The VR defaults live in sm64_vision_3d.h — the in-game DJUI panel is plain C
+// and cannot include this header, which imports UIKit.)
+
 // Boots the SDL/coopdx engine under the SwiftUI app entry and owns the 2D<->3D
 // transition sequencing. Hosted in the SwiftUI WindowGroup (see SM64VisionApp.swift).
 @interface SM64HostViewController : UIViewController

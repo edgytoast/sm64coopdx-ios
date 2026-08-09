@@ -1,0 +1,174 @@
+#ifndef SM64_VR_SPIKE_H
+#define SM64_VR_SPIKE_H
+
+// R0 SPIKE — THROWAWAY. Not part of the shipping VR mode.
+//
+// VR-CHARTER §5 R0.1: prove the immersion-style contract for a SECOND immersive
+// space before anything is built on it. The recorded trap (SM64VisionApp.swift
+// :243-247) is that merely ALLOWING .progressive in the EXISTING space's style
+// set changed the drawable contract and aborted cp_drawable_encode_present
+// (__BUG_IN_CLIENT__). A7's preferred path — one "SM64-VR" space with
+// .immersionStyle(selection:, in: .mixed, .full) switching live — is the same
+// SHAPE as that trap, so it must be measured, not assumed.
+//
+// Three spaces are declared instead of one switchable one, deliberately: the
+// question is what each style SET does to the contract, and a set is fixed at
+// scene-declaration time. Opening them one at a time answers all three, and the
+// middle one additionally answers "does a LIVE switch survive".
+//
+//   variant 1  "SM64-VR-MIXED"   .immersionStyle(.constant(.mixed), in: .mixed)
+//   variant 2  "SM64-VR-SWITCH"  .immersionStyle($style,  in: .mixed, .full)
+//                                 + a live .mixed -> .full -> .mixed switch
+//   variant 3  "SM64-VR-FULL"    .immersionStyle(.constant(.full),  in: .full)
+//
+// The loop itself is the minimum that can present: clear each view to a colour
+// with PARTIAL alpha (so passthrough showing through is visible in .mixed and
+// its absence is visible in .full), write depth, present. Every contract fact
+// the drawable exposes is logged on the first frame and on every CHANGE, which
+// is what makes "did the style switch change the contract" a readable answer
+// rather than an inference.
+
+#include "sm64_vision_3d.h"
+
+#ifdef SM64_VISION_3D
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+// The spike render loop, run on its own thread from the CompositorLayer closure
+// (same rule as the 3D loop: never the main thread). variant is 1/2/3 above.
+void sm64_vr_spike_run(void *layer_renderer, int variant);
+
+// Loop handshake, same contract as sm64_3d_imm_stop/running.
+extern volatile int sm64_vr_spike_stop;
+extern volatile int sm64_vr_spike_running;
+
+// Enter/exit. variant 0 = exit. Implemented in sm64_vision_host.m, which owns
+// the transition sequencing: the engine goes offscreen BEFORE the space opens,
+// because in .full the 2D window is certainly hidden and a hidden window's
+// nextDrawable never returns.
+void sm64_vr_spike_enter(int variant);
+
+// Which variant is live (0 = none). Written by sm64_vr_spike_enter.
+extern volatile int sm64_vr_spike_variant;
+
+// Live style switch for variant 2, driven from the loop's own frame clock.
+// Implemented in Swift (@_cdecl); declared here so the loop can call it.
+void SM64_SetVRSpikeStyleFull(bool full);
+
+// Live tunables, pushed by sm64_3d_apply_settings from the settings sheet while
+// the sliders are dragged. scale = game units per metre, dist/height in metres,
+// stereo = eye offset as a fraction of the true IPD (the donor's cross-eye
+// lever, 0.50 shipped). Out-of-range values are ignored per-field.
+void sm64_vr_spike_set_tunables(float scale, float dist, float height, float stereo);
+
+// Re-freeze the head pose on the next tracked frame ("Recenter VR World").
+void sm64_vr_spike_recenter(void);
+
+// Eye render resolution as a fraction of the per-eye logical viewport. Below 1.0
+// upsamples (jaggies); above 1.0 supersamples. The donor ships 0.4-1.0.
+void sm64_vr_spike_set_render_scale(float scale);
+
+// World lock: the placement stays anchored in the room and the VIEW follows the
+// live head pose. Off = the frozen view, which reads as head-locked.
+void sm64_vr_spike_set_world_lock(int on);
+
+// Surroundings dimming, 0..1 on the UI scale (perceptual curve applied inside).
+// 1.0 = no passthrough. This replaces the "Full VR" button.
+void sm64_vr_spike_set_dim(float dim);
+
+// Panel mode (charter A5): present the flat frame on a world-locked panel rather
+// than as a stereo world. Driven from the engine thread each frame by
+// sm64_vr_frame_is_nongameplay().
+void sm64_vr_spike_set_panel_mode(int on);
+int  sm64_vr_spike_panel_mode(void);
+
+// "Is this frame a menu?" — sm64_vr_gamestate.c, evaluated on the engine thread.
+bool sm64_vr_frame_is_nongameplay(void);
+
+// VR view modes (sm64_vr_presets.c). A mode is a remembered set of placement
+// numbers; switching snapshots what you dialled in and restores the other's.
+int         sm64_vr_preset_count(void);
+const char *sm64_vr_preset_name(int i);
+int         sm64_vr_preset_get(void);
+void        sm64_vr_preset_apply(int idx);
+void        sm64_vr_preset_cycle(void);
+void        sm64_vr_preset_reset_current(void);
+
+// True while the active mode is first-person (charter R4). Hand-shaped gestures
+// are gated on this: outside first-person the controllers are just a pad.
+bool        sm64_vr_first_person_active(void);
+
+// Sky dome (charter A8 / R4). skybox.c asks whether to build the 3D sphere in
+// place of the flat ortho skybox; gfx_pc.c asks for the dome's translation-free
+// view-projection while the dome's markers are open. Both return the "no" answer
+// (0 / NULL) on panel-fallback frames, so those keep the ordinary flat sky.
+int          sm64_vr_sky_dome_active(void);
+const float *sm64_vr_sky_viewproj(int eye);
+
+// Room -> game-camera space, 16 floats in simd column-major order. The transform
+// anything tracked in the ROOM needs before it can be drawn in the WORLD; the
+// hands are its only caller today. 0 when VR is not driving the frame.
+int sm64_vr_camera_from_world(float *out16);
+
+// D-pad up cycles the view mode without opening a menu (donor pc_main.c:497-503).
+// Engine thread only — it reads the game's controller state.
+void sm64_vr_poll_hotkeys(void);
+
+// Keep the game's own first-person camera in step with the VR mode, including
+// the re-assert that survives a network reset clearing it underneath us.
+void sm64_vr_sync_first_person(void);
+
+// Level the first-person pitch when the stick-look mode changes away from Free.
+// Turn and Snap give the stick yaw only, so a pitch carried over from Free is an
+// offset you cannot look out of.
+void sm64_vr_sync_look_mode(void);
+
+// Flip cam: somersault the view with Mario. The angle and the axis it belongs to
+// arrive in ONE call on purpose — split, an eased angle lands on the axis the
+// next move just switched to.
+void sm64_vr_set_flip(float radians, bool side);
+void sm64_vr_update_flip_cam(void);
+
+// The VR options panel stays in the stereo world so its sliders can be judged
+// against the thing they change; the menu rides an enlarged HUD plane.
+void sm64_vr_spike_set_menu_over_world(int on);
+int  sm64_vr_spike_menu_over_world(void);
+
+// Anti-clip handoff (charter R2). The loop publishes the cyclopean eye in
+// game-camera space; sm64_vr_anticlip_resolve (engine thread) runs the level's
+// collision on it and hands back an anchor offset in metres.
+bool  sm64_vr_anticlip_get_head_campos(float out[3]);
+void  sm64_vr_anticlip_set_offset(const float m[3]);
+float sm64_vr_anticlip_world_scale(void);
+void  sm64_vr_anticlip_resolve(void);
+
+// The act/star selector: a DEADLINE in seconds, stamped by star_select.c. Not a
+// frame count — the stamp is refilled per sim tick and read per rendered frame,
+// and counting made the two rates race (see sm64_vr_gamestate.c).
+extern double gVrActSelectorUntil;
+
+// Is something grabbable within Mario's reach (or is he already holding)? The
+// grips become B only when this is true, so a squeeze in open space does not
+// punch the air.
+bool sm64_vr_grabbable_in_reach(void);
+
+// The menu button's long press. Networked-only, like the donor's.
+void sm64_vr_toggle_chat(void);
+
+// The VR eye-texture size, so gfx_metal and gfx_pc can both size from the VIEW
+// instead of the flat panel's budget. Returns 0 when VR is not driving.
+int sm64_vr_spike_render_size(int *w, int *h);
+
+// Write both ENGINE eye textures to Documents as vr-eye-L/R.png. Also fires once
+// automatically a few seconds into each VR entry, so the artifact exists without
+// anyone having to remember to press anything.
+void sm64_vr_spike_dump_eyes(void);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif // SM64_VISION_3D
+#endif // SM64_VR_SPIKE_H

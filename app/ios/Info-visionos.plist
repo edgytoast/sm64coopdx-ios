@@ -38,6 +38,38 @@
 	</dict>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>SM64CoopDX uses the local network to find and connect to co-op games on your Wi-Fi.</string>
+	<!-- Charter R3 / A10: accessory tracking is what gives the Sense controllers
+	     their handedness and (next step) their poses. ARKit gates it behind
+	     ar_authorization_type_accessory_tracking, which needs this key present or
+	     the request is refused without ever asking the user. -->
+	<key>NSAccessoryTrackingUsageDescription</key>
+	<string>SM64CoopDX uses your PSVR2 Sense controllers to play in VR.</string>
+	<!-- THE KEY THAT MAKES THE SENSE PAIR TRACKABLE (Fable, 2026-08-08 —
+	     Fable/2026-08-08-psvr2-sense-accessory-tracking-load-fails-ANSWER.md).
+	     Without this declaration the system hands the app a COMPATIBILITY
+	     presentation: the pair arrives as ONE aggregated MFi-category gamepad.
+	     An aggregate virtual gamepad is not a trackable accessory, so
+	     ar_accessory_load_from_device correctly fails on it (error 1200) — which
+	     is what we spent two device rounds mistaking for "this hardware cannot
+	     be tracked". With it, the pair should present as TWO
+	     GCProductCategorySpatialController devices, each of which loads.
+
+	     Authorization and enumeration are separate systems, which is why the
+	     permission prompt appeared and was granted while the load still failed,
+	     and why no Settings row ever appeared: nothing had registered as a
+	     spatial-accessory client for the row to hang on.
+
+	     HAND-EDITED ON PURPOSE. Xcode 26's capability editor has a bug that can
+	     damage or drop existing ARKit plist values when the Spatial Gamepad box
+	     is ticked, and the ARKit usage strings above are exactly what it would
+	     eat. Do not "fix" this through the capabilities UI. -->
+	<key>GCSupportedGameControllers</key>
+	<array>
+		<dict>
+			<key>ProfileName</key>
+			<string>SpatialGamepad</string>
+		</dict>
+	</array>
 	<key>UIApplicationSupportsIndirectInputEvents</key>
 	<true/>
 	<key>UIFileSharingEnabled</key>

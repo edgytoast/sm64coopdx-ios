@@ -74,6 +74,13 @@ function(_sm64_vision3d_wire)
         ${GAME_ROOT}/src/pc/vision3d/sm64_vision_host.m
         ${GAME_ROOT}/src/pc/vision3d/sm64_immersive.m
         ${GAME_ROOT}/src/pc/vision3d/sm64_vision_settings.m
+        # R0 SPIKE (throwaway — VR-CHARTER §5 R0.1). Delete this line and the
+        # file with the spike branch.
+        ${GAME_ROOT}/src/pc/vision3d/sm64_vr_spike.m
+        # Charter R3: the Sense-controller backend (GameController + ARKit).
+        ${GAME_ROOT}/src/pc/vision3d/controller_vision.m
+        # Charter R4: accessory poses, so first-person can draw your hands.
+        ${GAME_ROOT}/src/pc/vision3d/sm64_vr_hands.m
     )
     # -fobjc-arc is MANDATORY, and its absence is not a compile error — it is a
     # crash days later. This tree does NOT enable ARC globally; overlay 0005
@@ -92,6 +99,10 @@ function(_sm64_vision3d_wire)
     target_sources(sm64coopdx PRIVATE
         ${_sm64_v3d_objc}
         ${GAME_ROOT}/src/pc/vision3d/SM64VisionApp.swift
+        # The in-game VR options panel: plain C, so no -fobjc-arc.
+        ${GAME_ROOT}/src/pc/vision3d/djui_panel_vr.c
+        ${GAME_ROOT}/src/pc/vision3d/sm64_vr_gamestate.c
+        ${GAME_ROOT}/src/pc/vision3d/sm64_vr_presets.c
     )
     set_target_properties(sm64coopdx PROPERTIES
         # Build number (CFBundleVersion). Separate build setting from 0005's

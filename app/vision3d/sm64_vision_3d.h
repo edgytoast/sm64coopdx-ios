@@ -63,6 +63,19 @@ extern "C" {
 #define SM64_GFX_TAG_BG_BEGIN 0x534B5942u  // 'SKYB' — background layer begin
 #define SM64_GFX_TAG_BG_END   0x534B5945u  // 'SKYE' — background layer end
 
+// Sky-dome markers (charter A8 / R4). In VR the ortho skybox is useless — a
+// fullscreen 2D image cannot surround you — so it is dropped (sm64_vr_hide_
+// background) and skybox.c builds a real 3D sphere instead. The dome is
+// PERSPECTIVE geometry, so it would otherwise take the ordinary EyeVP and pick
+// up that eye's translation: at any radius small enough to survive the far
+// plane, the two eyes see measurably different parallax and the sky reads as a
+// painted ball a foot from your face rather than as sky. These markers bracket
+// the dome so gfx_stereo_projection() hands it the TRANSLATION-FREE VP instead
+// (sm64_vr_sky_viewproj), which is the donor's rotation-only sky VP by another
+// name: same rotation, no parallax, sky at infinity at any radius.
+#define SM64_GFX_TAG_SKY_BEGIN 0x53444D42u  // 'SDMB' — sky dome begin
+#define SM64_GFX_TAG_SKY_END   0x53444D45u  // 'SDME' — sky dome end
+
 // 3D mode: while ON, gfx_metal renders into the offscreen per-eye textures and
 // NEVER acquires or presents the window's drawable. That is load-bearing, not an
 // optimisation: the 2D window is hidden behind the immersive space and its
@@ -120,6 +133,18 @@ void *sm64_metal_get_sdl_uiview(void);
 // ---------------------------------------------------------------------------
 void sm64_gfx_set_3d_params(float separation, float convergence, float hud_depth);
 
+// MSAA for the VR eye passes (gfx_metal.mm). 1 = off; 2/4/8 are validated
+// against the device. The flat panel deliberately stays at 1: it already
+// supersamples ~2.7x, which antialiases better than MSAA for free. VR covers a
+// whole field of view at ~0.85x, so it has no such margin — this is the cheapest
+// way to kill the edge shimmer there.
+void gfx_metal_set_msaa(int samples);
+
+// VR first-person stick look, read by first_person_cam.c at its own fold.
+// Returns -1 when this is not VR first-person, else 0 Free / 1 Turn / 2 Snap.
+int   sm64_vr_stick_look_mode(void);
+float sm64_vr_look_sensitivity(void);
+
 // ---------------------------------------------------------------------------
 // Panel + loop — implemented in sm64_immersive.m.
 // ---------------------------------------------------------------------------
@@ -152,6 +177,8 @@ float sm64_3d_auto_convergence(void);
 // running) so the caller falls back to overlay 0012's sleep limiter. Called from
 // pc_main.c's produce_interpolation_frames_and_delay().
 bool sm64_3d_wait_for_compositor_frame(void);
+// R0 SPIKE (throwaway): lets the VR probe loop drive the same phase-lock.
+void sm64_3d_pace_signal_now(void);
 // Surroundings dimming, 0..1 on the UI scale. Mapped through a perceptual curve
 // internally (linear "doesn't get dark until 80%" — guide §2.7).
 void sm64_3d_set_dim(float dim);
@@ -197,6 +224,89 @@ void sm64_3d_frame_poll(void);
 // Settings storage (NSUserDefaults-backed; shared with the settings table).
 float sm64_3d_setting_f(const char *key, float def);
 void  sm64_3d_setting_set_f(const char *key, float val);
+
+// Push the stored settings into the live panel/stereo/VR state (sm64_vision_host.m).
+void sm64_3d_apply_settings(void);
+
+// ---------------------------------------------------------------------------
+// VR defaults live HERE, not in sm64_vision_host.h with the panel's, for one
+// reason: the in-game DJUI VR panel is plain C and cannot include that header
+// (it imports UIKit). Both menus therefore read one set of numbers, which is the
+// same "one source of truth" rule the panel defaults already follow.
+// ---------------------------------------------------------------------------
+#define SM64_DEF_VRSCALE     1376.0f // game units per metre (bigger = smaller world)
+#define SM64_DEF_VRDIST      0.60f   // metres in front of the anchored head
+#define SM64_DEF_VRHEIGHT   (-0.35f) // metres relative to eye level
+#define SM64_DEF_VRSTEREO    1.00f   // eye offset as a fraction of the true IPD
+#define SM64_DEF_VRRENDER    0.85f   // eye render size as a fraction of the per-eye view
+#define SM64_DEF_VRWORLDLOCK 1.0f    // 1 = look around the world; 0 = it follows your head
+#define SM64_DEF_VRDIM       1.00f   // surroundings dimming; 1.0 = no passthrough
+// First-person stick look: 0 = Free (stick also pitches), 1 = Turn (smooth yaw
+// only — the headset owns pitch, the donor's first public player request),
+// 2 = Snap (instant 45 degrees per flick, the discrete turn other VR games use).
+#define SM64_DEF_VRLOOKMODE  1.0f
+#define SM64_DEF_VRLOOKSENS  1.0f    // multiplier on the stick's turn rate
+#define SM64_DEF_VRFLIPCAM   0.0f    // somersault the view on a flip. Off by default:
+                                     // it is a great trick and it will make you sick.
+// Mario's hands on your controllers (charter R4). ON by default, but it draws
+// only in first-person AND only when a controller is actually pose-tracked, so
+// on hardware that turns out not to be trackable this costs a flag test and
+// changes nothing on screen.
+#define SM64_DEF_VRHANDS     1.0f
+// Hand size, shown to players as a whole number 1..20 rather than as the raw
+// multiplier — "0.16" means nothing to anyone. 16 is Austin's device value.
+#define SM64_DEF_VRHANDSIZE  16.0f
+#define SM64_VR_HANDSIZE_DIV 100.0f
+
+// HAND ORIENTATION — HARDCODED from what Austin arrived at on device
+// (2026-08-09), nudged only enough to make the two hands symmetric. He had
+// L(88.96, -17.00, -20.00) and R(97.65, +17.00, -20.00): pitch was already a
+// clean +/-17 mirror and roll already matched at -20, so only yaw needed
+// evening, to 89 / 98.
+//
+// The mirror centre is 93.5, NOT 90, and that is not a bug to "correct".
+// Mario's left and right hands are separate meshes rather than one mesh
+// reflected, so nothing requires their correction to straddle the sagittal
+// plane. Austin's eye found the real number; the geometry has no opinion.
+//
+// These stopped being settings once they were found: they describe how ARKit's
+// held-controller frame relates to Mario's hand mesh, which is a property of two
+// models, not a player preference. The sliders that found them are gone.
+#define SM64_VR_HAND_L_YAW    89.0f
+#define SM64_VR_HAND_L_PITCH -17.0f
+#define SM64_VR_HAND_L_ROLL  -20.0f
+#define SM64_VR_HAND_R_YAW    98.0f
+#define SM64_VR_HAND_R_PITCH  17.0f
+#define SM64_VR_HAND_R_ROLL  -20.0f
+#define SM64_VR_HAND_OFF_Z   -0.07f   // metres, forward out of the grip
+#define SM64_VR_HAND_OFF_Y    0.0f
+#define SM64_VR_HAND_OFF_X    0.0f
+#define SM64_VR_HAND_STYLE    3       // lit; the other three were search scaffolding
+
+#define SM64_DEF_VRGESTUREGRAB  0.0f
+#define SM64_DEF_VRGESTUREPUNCH 0.0f
+#define SM64_DEF_VRPUNCHSPEED   1.6f   // metres/sec of forward hand speed
+// Who drives the Sense pair. ON by default as of 2026-08-08: declaring
+// SpatialGamepad removes the aggregate MFi device entirely, and SDL 2.32 —
+// which predates spatial controllers — can only open the two halves as raw
+// joysticks with alphabetically-mapped elements and no GUID mapping. On device
+// that meant no character movement at all until this was ticked. SDL is no
+// longer a working fallback for this hardware; it is only a way out if the
+// fixed layout misbehaves.
+#define SM64_DEF_VRINPUTNATIVE 1.0f
+
+// Hand material (charter R4). The hand display lists carry NO render state, so
+// something has to supply it, and getting it wrong fails SILENTLY as wrong
+// colour rather than as an error — Austin's first sighting was "black gaussian
+// circles". Rather than spend a device round per guess, this selects between
+// candidates so one round can find the right one:
+//   0 = flat primitive colour   1 = environment colour
+//   2 = vertex shade            3 = lit, with a plain white light (closest to
+//                                   how Mario is actually drawn)
+#define SM64_DEF_VRHANDSTYLE 3.0f
+#define SM64_DEF_VRMSAA      2.0f    // VR eye-pass MSAA. 2x by Austin's eye on device
+                                     // (2026-08-07): "2x is good ... hard to see noticeable
+                                     // improvement after that", and it is the cheapest rung.
 
 #ifdef __cplusplus
 }

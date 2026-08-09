@@ -513,7 +513,7 @@ WHAT IS NOT TOUCHED
 +#endif // SM64_VISION_HOST_H
 --- /dev/null
 +++ b/src/pc/vision3d/sm64_vision_host.m
-@@ -0,0 +1,691 @@
+@@ -0,0 +1,763 @@
 +// sm64_vision_host.m — boots the SDL/coopdx engine under the SwiftUI app entry
 +// (visionOS only) and owns the 2D<->3D transition sequencing.
 +//
@@ -671,6 +671,70 @@ WHAT IS NOT TOUCHED
 +// the SDL patch, untouched), and fires SDL's viewDidLayoutSubviews so the engine
 +// picks up the new render size. This is the SDL2 counterpart to the geometry
 +// tracking SDL3 gets from being scene-aware; SDL2 predates scenes entirely.
++// THE SQUARE CORNERS (Fable round 3, confirmed 2026-08-09).
++//
++// visionOS applies its rounded-corner treatment PER WINDOW, to windows the
++// system manages — not to the composited scene output. The proof is the symptom
++// itself: if the mask were applied to the flattened scene, opaque content in the
++// corners could never square them, because the mask would clip our window's
++// corners exactly as it clips the primary's. "Rounded until the second window
++// paints, square after" is only possible with per-window masking.
++//
++// And our SDL window is not a window the system manages. SDL2 predates scenes
++// entirely, so its UIWindow is created scene-less and adopted (above) as a
++// SECONDARY window in the SwiftUI scene; the tracker below then stretches it,
++// opaque and Metal-backed, across the FULL scene bounds — including the corners
++// the system rounds on the primary. Nothing we did wrong: this was latent in the
++// two-window graft from the day it was written, and the corners go square at the
++// exact moment the game loop first runs this function.
++//
++// The fix is to wear the same corners the primary wears, READ FROM IT rather
++// than hardcoded, so a resize (or a future OS that varies the radius with window
++// size) is followed for free. The fallback exists only for the case where the
++// system rounds via a mechanism invisible to the process.
++#define SM64_WIN_CORNER_FALLBACK 46.0
++
++static void SM64_MirrorWindowCorners(UIWindow *win, UIWindowScene *scene) {
++    UIWindow *primary = nil;
++    for (UIWindow *w in scene.windows) {
++        if (w == win) { continue; }
++        primary = w;
++        if (w.isKeyWindow) { break; }   // prefer the key window if there are several
++    }
++
++    CGFloat r = primary ? primary.layer.cornerRadius : 0.0;
++    CALayerCornerCurve curve = primary ? primary.layer.cornerCurve : kCACornerCurveContinuous;
++    if (r <= 0.0) {
++        // The primary reports no radius of its own, so the rounding happens
++        // somewhere we cannot read. Wear a stand-in rather than nothing.
++        r = SM64_WIN_CORNER_FALLBACK;
++        curve = kCACornerCurveContinuous;
++    }
++    if (win.layer.cornerRadius != r) {
++        win.layer.cornerRadius = r;
++        win.layer.cornerCurve = curve;
++        win.layer.masksToBounds = YES;
++        NSLog(@"[sm64vp] window corners: radius %.1f curve %@ (primary %@)",
++              (double)r, curve, primary ? @"read" : @"absent — using fallback");
++    }
++}
++
++// One-shot inventory of every window in the scene, ~2 s in. Confirms the
++// mechanism and says which branch above is live, in the same build as the fix.
++static void SM64_LogWindowInventory(UIWindowScene *scene, UIWindow *ours) {
++    static bool logged = false;
++    if (logged) { return; }
++    logged = true;
++    for (UIWindow *w in scene.windows) {
++        NSLog(@"[sm64vp] window %@ %@ level=%.0f frame=%@ radius=%.1f curve=%@ "
++               "masks=%d mask=%@",
++              (w == ours) ? @"[SDL]" : @"[other]", NSStringFromClass(w.class),
++              (double)w.windowLevel, NSStringFromCGRect(w.frame),
++              (double)w.layer.cornerRadius, w.layer.cornerCurve,
++              w.layer.masksToBounds, w.layer.mask ? @"yes" : @"nil");
++    }
++}
++
 +static void SM64_TrackSDLWindowToScene(void) {
 +    UIView *view = (__bridge UIView *)sm64_metal_get_sdl_uiview();
 +    UIWindow *win = view.window;
@@ -681,6 +745,14 @@ WHAT IS NOT TOUCHED
 +        NSLog(@"[sm64vp] window resize: frame %@ -> scene bounds %@",
 +              NSStringFromCGRect(win.frame), NSStringFromCGRect(b));
 +        win.frame = b;
++    }
++    // Re-asserted beside the frame, and for the same reason: this window sits
++    // outside UIKit's automatic scene handling, so anything the system would
++    // have done for it has to be done here.
++    SM64_MirrorWindowCorners(win, scene);
++    {
++        static int frames = 0;
++        if (++frames == 120) { SM64_LogWindowInventory(scene, win); }
 +    }
 +}
 +

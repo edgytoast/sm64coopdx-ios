@@ -6330,10 +6330,12 @@ WHAT IS NOT TOUCHED
      rsp.modelview_matrix_stack_size = 1;
      rsp.current_num_lights = 2;
      rsp.lights_changed = true;
-@@ -2078,6 +2305,146 @@
-     return gfx_rapi;
- }
+@@ -2076,7 +2303,156 @@
  
+ struct GfxRenderingAPI *gfx_get_current_rendering_api(void) {
+     return gfx_rapi;
++}
++
 +#ifdef SM64_VISION_3D
 +// The tail of gfx_run(), split out so the both-eyes path can run it twice.
 +static void gfx_run_eye(Gfx *commands);
@@ -6411,7 +6413,16 @@ WHAT IS NOT TOUCHED
 +       walk the candidates instead of costing a round each. Culling is off for all
 +       of them: a hand seen from the wrong side of its winding vanishes, and that
 +       would read as a pose bug rather than a material one. */
-+    const int style = (int) sm64_3d_setting_f("vrHandStyle", SM64_DEF_VRHANDSTYLE);
++    /* ROUNDED, not truncated. The sheet's slider is continuous 0..3, so
++       truncation made style 3 — the lit one, and the only one that treats his
++       vertices as the NORMALS they are — reachable ONLY at exactly 3.0. Austin
++       slid it to 2.91, landed on style 2, and got the documented
++       normals-read-as-colours trap: iridescent rainbow facets, which is exactly
++       what a normal vector displayed as RGB looks like. That was my UI bug
++       presenting as a rendering bug. */
++    int style = (int) (sm64_3d_setting_f("vrHandStyle", SM64_DEF_VRHANDSTYLE) + 0.5f);
++    if (style < 0) { style = 0; }
++    if (style > 3) { style = 3; }
 +
 +    Gfx *g = dl;
 +    gDPPipeSync(g++);
@@ -6471,13 +6482,12 @@ WHAT IS NOT TOUCHED
 +    gDPPipeSync(g++);
 +    gSPEndDisplayList(g);
 +    return dl;
-+}
+ }
 +#endif
-+
+ 
  void gfx_start_frame(void) {
      if (gGfxPcResetTex1 > 0) {
-         gGfxPcResetTex1--;
-@@ -2086,6 +2453,21 @@
+@@ -2086,6 +2462,21 @@
      }
      gfx_wapi->handle_events();
      gfx_wapi->get_dimensions(&gfx_current_dimensions.width, &gfx_current_dimensions.height);
@@ -6499,7 +6509,7 @@ WHAT IS NOT TOUCHED
      if (gfx_current_dimensions.height == 0) {
          // Avoid division by zero
          gfx_current_dimensions.height = 1;
-@@ -2100,6 +2482,46 @@
+@@ -2100,6 +2491,46 @@
  }
  
  void gfx_run(Gfx *commands) {
@@ -6546,7 +6556,7 @@ WHAT IS NOT TOUCHED
      gfx_sp_reset();
  
      sHasInverseCameraMatrix = false;
-@@ -2115,6 +2537,9 @@
+@@ -2115,6 +2546,9 @@
      //double t0 = gfx_wapi->get_time();
      gfx_rapi->start_frame();
      gfx_run_dl(commands);
@@ -6556,7 +6566,7 @@ WHAT IS NOT TOUCHED
  }
  
  void gfx_end_frame_render(void) {
-@@ -2458,6 +2883,21 @@
+@@ -2458,6 +2892,21 @@
  void OPTIMIZE_O3 ext_gfx_run_dl(Gfx* cmd) {
      uint32_t opcode = cmd->words.w0 >> 24;
      switch (opcode) {

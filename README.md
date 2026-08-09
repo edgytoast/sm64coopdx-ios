@@ -31,6 +31,21 @@ On **Apple Vision Pro**, first install SideStore onto the headset with
 Then **add your ROM** (see below) at first launch, or via the **Files** app →
 *On My Apple Vision Pro → sm64coopdx* → drop the file in.
 
+## Texture packs (highly recommended)
+
+Render96's HD textures and models make an enormous difference, and coopdx loads
+them natively through DynOS. **Highly recommended for the best experience** —
+especially in VR, where you are standing next to the geometry.
+
+| Pack | Download |
+|---|---|
+| **Render96 HD Texture Pack** | [1.3.26.7.7](https://github.com/pokeheadroom/RENDER96-HD-TEXTURE-PACK/releases/tag/1.3.26.7.7) |
+| **Render96 Model Pack** | [3.25](https://github.com/Render96/ModelPack/releases/tag/3.25) |
+
+Extract each download and drop the resulting folder into the **Files** app →
+*On My Vision Pro → SM64CoopDX → dynos → packs*, then turn them on in-game under
+*Options → DynOS Packs*.
+
 ## You bring the ROM
 
 sm64coopdx ships with **no game content** — nothing copyrighted is included. To play,

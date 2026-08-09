@@ -360,15 +360,29 @@ int sm64_vr_hand_matrix(int hand, float out[4][4]) {
 
     simd_float4x4 M = simd_mul(CfW, sHandWorld[hand]);
 
-    // Mario's hand geometry is in HIS units, and camera space is game units, so
-    // the only scaling wanted is the taste knob. Applied on the right so it
-    // scales the model about its own origin rather than sliding it along the
-    // camera axes.
-    const float handScale = sm64_vr_hands_scale();
-    if (handScale != 1.0f) {
+    // THE UNIT BUG, and it is why Austin saw a grey mass swallowing the castle
+    // rather than a pair of hands (device, 2026-08-09).
+    //
+    // camFromWorld converts METRES to GAME UNITS — it carries a factor of
+    // sVrScale, which is 100 in first-person. Mario's hand display list is
+    // already in GAME UNITS. Feeding it through unchanged therefore treated his
+    // hand as though it were measured in metres and scaled it by 100: a hand
+    // roughly forty metres across, centred on the controller, intersecting the
+    // level and filling the view. Austin read the result as "the sky", which is
+    // exactly what a grey wall of triangles at arm's length looks like — and it
+    // is why the Hand Size and Hand Style sliders appeared to control the sky.
+    //
+    // So take the metres out again before the model is placed: divide by the
+    // same world scale camFromWorld multiplied in. The hand then renders at its
+    // native game-unit size, which in first-person IS life size, because that is
+    // what the first-person world scale means.
+    const float worldScale = sm64_vr_anticlip_world_scale();
+    const float unitFix = (worldScale > 1.0f) ? (1.0f / worldScale) : 1.0f;
+    const float s = sm64_vr_hands_scale() * unitFix;
+    {
         simd_float4x4 S = matrix_identity_float4x4;
-        S.columns[0].x = S.columns[1].y = S.columns[2].z = handScale;
-        M = simd_mul(M, S);
+        S.columns[0].x = S.columns[1].y = S.columns[2].z = s;
+        M = simd_mul(M, S);   // on the RIGHT: scales the model about its own origin
     }
 
     // simd stores column-major, which IS fast3d's row-vector layout read straight

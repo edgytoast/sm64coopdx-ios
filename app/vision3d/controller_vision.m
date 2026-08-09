@@ -59,6 +59,7 @@
 
 #include <ultra64.h>
 #include "pc/controller/controller_api.h"
+#include "pc/controller/controller_touchscreen.h"  // gGamepadActive: the touch-pad autohide flag
 #include "pc/vision3d/controller_vision.h"
 #include "pc/vision3d/sm64_vr_spike.h"   // mode cycle, recenter, grab gate, chat
 #include "pc/vision3d/sm64_vr_hands.h"   // accessory poses (a separate question from input)
@@ -286,6 +287,22 @@ static void controller_vision_read(OSContPad *pad) {
 
     GCController *L = sHand[0], *R = sHand[1];
     if (L == nil && R == nil) { return; }   // nothing held: report nothing, hold nothing
+
+    // THE TOUCHSCREEN CONTROLS COMING BACK (Austin, device 2026-08-09).
+    //
+    // render_touch_controls() hides itself on `gGamepadActive`, and the ONLY
+    // writer of that flag is controller_sdl. Once the spatial pair is filtered
+    // out of SDL, nothing ever sets it, so the game concludes there is no
+    // controller and paints the on-screen pad over a game being played with two
+    // real controllers. Every other "the controllers stopped working" symptom
+    // has the same root: the game's idea of whether a pad exists lives in SDL,
+    // and we took the pad out of SDL without telling it.
+    //
+    // Asserted here, every frame we actually drive the pad, rather than once at
+    // connect — a controller that disconnects stops driving, and the flag goes
+    // stale with it on the next touch-config entry.
+    extern bool gGamepadActive;
+    gGamepadActive = true;
 
     float lx, ly, rx, ry;
     // The thumbstick is a DIRECTION PAD, which is why it lives under `dpads`.

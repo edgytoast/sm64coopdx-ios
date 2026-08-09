@@ -80,8 +80,11 @@ static float sm64_vr_hands_scale(void) {
     // hands still too big, and Mario's hand geometry is ROM-loaded so its extent
     // cannot be measured at build time to normalise against. Direct control beats
     // another round of me inferring the model's size from screenshots.
+    // Stored as the human-readable 1..20 and divided here into the multiplier the
+    // matrix wants, so the number a player sees is never 0.16.
     float s = sm64_3d_setting_f("vrHandSize", SM64_DEF_VRHANDSIZE);
-    return (s >= 0.01f && s <= 10.0f) ? s : SM64_DEF_VRHANDSIZE;
+    if (s < 1.0f || s > 20.0f) { s = SM64_DEF_VRHANDSIZE; }
+    return s / SM64_VR_HANDSIZE_DIV;
 }
 
 // Orientation offset. The accessory pose's axes are ARKit's convention for a
@@ -91,20 +94,15 @@ static float sm64_vr_hands_scale(void) {
 // exposed and can be dialled in the headset — this is a tuning problem, so it
 // gets a tuning UI. Applied BETWEEN the pose and the model, so it rotates the
 // hand about its own origin rather than swinging it through the room.
-// PER HAND, because they are mirrored meshes on mirrored controllers and there
-// is no reason a single correction should suit both — Austin asked for enough
-// knobs to actually land it, and one shared set was not enough. Plus a position
-// offset, so a hand that sits correctly oriented but in the wrong place (behind
-// the grip, or inside the controller) can be pushed out in front.
+// Orientation offset, FIXED — see the header. This is how ARKit's held-controller
+// frame relates to Mario's hand mesh, which is a property of two models rather
+// than a preference, so it stopped being a setting the moment it was found.
 static simd_float4x4 sm64_vr_hand_rotation(int hand) {
     const float d2r = 3.14159265f / 180.0f;
     const int R = (hand == SM64_VR_HAND_RIGHT);
-    float yaw   = (R ? sm64_3d_setting_f("vrRHandYaw",   SM64_DEF_VRRHANDYAW)
-                     : sm64_3d_setting_f("vrHandYaw",    SM64_DEF_VRHANDYAW))   * d2r;
-    float pitch = (R ? sm64_3d_setting_f("vrRHandPitch", SM64_DEF_VRRHANDPITCH)
-                     : sm64_3d_setting_f("vrHandPitch",  SM64_DEF_VRHANDPITCH)) * d2r;
-    float roll  = (R ? sm64_3d_setting_f("vrRHandRoll",  SM64_DEF_VRRHANDROLL)
-                     : sm64_3d_setting_f("vrHandRoll",   SM64_DEF_VRHANDROLL))  * d2r;
+    const float yaw   = (R ? SM64_VR_HAND_R_YAW   : SM64_VR_HAND_L_YAW)   * d2r;
+    const float pitch = (R ? SM64_VR_HAND_R_PITCH : SM64_VR_HAND_L_PITCH) * d2r;
+    const float roll  = (R ? SM64_VR_HAND_R_ROLL  : SM64_VR_HAND_L_ROLL)  * d2r;
     float cy = cosf(yaw),   sy = sinf(yaw);
     float cp = cosf(pitch), sp = sinf(pitch);
     float cr = cosf(roll),  sr = sinf(roll);
@@ -118,11 +116,9 @@ static simd_float4x4 sm64_vr_hand_rotation(int hand) {
     Rr.columns[0].x =  cr; Rr.columns[0].y =  sr;
     Rr.columns[1].x = -sr; Rr.columns[1].y =  cr;
     simd_float4x4 M = simd_mul(Ry, simd_mul(Rp, Rr));
-    // Position offset in METRES, in the hand's own frame: X right, Y up, Z back
-    // (so a positive "forward" pushes along -Z, which is where the hand points).
-    M.columns[3].x =  sm64_3d_setting_f("vrHandOffX", SM64_DEF_VRHANDOFFX);
-    M.columns[3].y =  sm64_3d_setting_f("vrHandOffY", SM64_DEF_VRHANDOFFY);
-    M.columns[3].z = -sm64_3d_setting_f("vrHandOffZ", SM64_DEF_VRHANDOFFZ);
+    M.columns[3].x =  SM64_VR_HAND_OFF_X;
+    M.columns[3].y =  SM64_VR_HAND_OFF_Y;
+    M.columns[3].z = -SM64_VR_HAND_OFF_Z;
     return M;
 }
 

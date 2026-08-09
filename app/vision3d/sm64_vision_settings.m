@@ -180,23 +180,13 @@ static __weak SM64SettingsVC *g_settingsVC = nil;
         // actually pose-tracked, so on hardware that cannot be tracked this row
         // does nothing visible — which is itself the answer worth having.
         mkrow(@"Show Mario Hands", @"vrHands", SM64_ROW_SWITCH, 0, 1, SM64_DEF_VRHANDS),
-        mkrow(@"Hand Size", @"vrHandSize", SM64_ROW_SLIDER, 0.05, 0.25, SM64_DEF_VRHANDSIZE),
+        mkrow(@"Hand Size", @"vrHandSize", SM64_ROW_SLIDER, 1, 20, SM64_DEF_VRHANDSIZE),
         // 0 prim / 1 env / 2 shade / 3 lit. Walk these to find the one that
         // renders his gloves rather than black blobs.
-        mkrow(@"Hand Style", @"vrHandStyle", SM64_ROW_SLIDER, 0, 3, SM64_DEF_VRHANDSTYLE),
         // Orientation, in degrees. Mario's hand mesh and ARKit's held-controller
         // axes do not agree and the correction is not derivable from either side,
         // so it is dialled rather than guessed.
-        mkrow(@"L Hand Yaw", @"vrHandYaw", SM64_ROW_SLIDER, SM64_DEF_VRHANDYAW - SM64_VR_ANGLE_SPAN, SM64_DEF_VRHANDYAW + SM64_VR_ANGLE_SPAN, SM64_DEF_VRHANDYAW),
-        mkrow(@"L Hand Pitch", @"vrHandPitch", SM64_ROW_SLIDER, SM64_DEF_VRHANDPITCH - SM64_VR_ANGLE_SPAN, SM64_DEF_VRHANDPITCH + SM64_VR_ANGLE_SPAN, SM64_DEF_VRHANDPITCH),
-        mkrow(@"L Hand Roll", @"vrHandRoll", SM64_ROW_SLIDER, SM64_DEF_VRHANDROLL - SM64_VR_ANGLE_SPAN, SM64_DEF_VRHANDROLL + SM64_VR_ANGLE_SPAN, SM64_DEF_VRHANDROLL),
-        mkrow(@"R Hand Yaw", @"vrRHandYaw", SM64_ROW_SLIDER, SM64_DEF_VRRHANDYAW - SM64_VR_ANGLE_SPAN, SM64_DEF_VRRHANDYAW + SM64_VR_ANGLE_SPAN, SM64_DEF_VRRHANDYAW),
-        mkrow(@"R Hand Pitch", @"vrRHandPitch", SM64_ROW_SLIDER, SM64_DEF_VRRHANDPITCH - SM64_VR_ANGLE_SPAN, SM64_DEF_VRRHANDPITCH + SM64_VR_ANGLE_SPAN, SM64_DEF_VRRHANDPITCH),
-        mkrow(@"R Hand Roll", @"vrRHandRoll", SM64_ROW_SLIDER, SM64_DEF_VRRHANDROLL - SM64_VR_ANGLE_SPAN, SM64_DEF_VRRHANDROLL + SM64_VR_ANGLE_SPAN, SM64_DEF_VRRHANDROLL),
         // Position, metres, in the hand's own frame.
-        mkrow(@"Hand Out (fwd)", @"vrHandOffZ", SM64_ROW_SLIDER, -0.16, 0.04, SM64_DEF_VRHANDOFFZ),
-        mkrow(@"Hand Up", @"vrHandOffY", SM64_ROW_SLIDER, -0.10, 0.10, SM64_DEF_VRHANDOFFY),
-        mkrow(@"Hand Side", @"vrHandOffX", SM64_ROW_SLIDER, -0.10, 0.10, SM64_DEF_VRHANDOFFX),
         mkrow(@"Grab With Hands", @"vrGestureGrab", SM64_ROW_SWITCH, 0, 1, SM64_DEF_VRGESTUREGRAB),
         mkrow(@"Punch With Hands", @"vrGesturePunch", SM64_ROW_SWITCH, 0, 1, SM64_DEF_VRGESTUREPUNCH),
         mkrow(@"Punch Sensitivity", @"vrPunchSpeed", SM64_ROW_SLIDER, 0.5, 4.0, SM64_DEF_VRPUNCHSPEED),
@@ -204,7 +194,6 @@ static __weak SM64SettingsVC *g_settingsVC = nil;
         // and driven by the fixed VR layout. Off: SDL drives it exactly as it
         // does today. This switch exists so a bad experiment costs a toggle
         // rather than a headset round — 1.1.2.22's lesson.
-        mkrow(@"VR Controller Input", @"vrInputNative", SM64_ROW_SWITCH, 0, 1, SM64_DEF_VRINPUTNATIVE),
         mkrow(@"Antialiasing", @"vrMsaa", SM64_ROW_SLIDER, 1, 8, SM64_DEF_VRMSAA),
         // R0 SPIKE (throwaway). Stereo Strength is a COMFORT lever, not a fix for
         // doubling — 2026-08-07's device round settled that (0% doubled WORSE,
@@ -237,11 +226,8 @@ static __weak SM64SettingsVC *g_settingsVC = nil;
 static BOOL sm64_row_is_hand_detail(SM64Row *r) {
     static NSSet *keys = nil;
     if (keys == nil) {
-        keys = [NSSet setWithArray:@[ @"vrHandSize", @"vrHandStyle",
-                                      @"vrHandYaw", @"vrHandPitch", @"vrHandRoll",
-                                      @"vrRHandYaw", @"vrRHandPitch", @"vrRHandRoll",
-                                      @"vrHandOffZ", @"vrHandOffY", @"vrHandOffX",
-                                      @"vrGestureGrab", @"vrGesturePunch", @"vrPunchSpeed" ]];
+        keys = [NSSet setWithArray:@[ @"vrHandSize", @"vrGestureGrab",
+                                      @"vrGesturePunch", @"vrPunchSpeed" ]];
     }
     return [keys containsObject:r.key];
 }
@@ -282,16 +268,34 @@ static BOOL sm64_row_is_hand_detail(SM64Row *r) {
     return hv;
 }
 
+// RESET IS SCOPED TO THE MODE YOU ARE IN (Austin, device 2026-08-09: hitting
+// Reset in first-person VR was wiping the world scale, distance and height and
+// dumping him out of a usable first-person view until he re-picked the mode).
+//
+// A single global reset was always wrong here: the panel settings and the VR
+// settings describe two different ways of playing, and the VR placement numbers
+// additionally belong to the ACTIVE view mode rather than to VR generally. So
+// placement goes back through sm64_vr_preset_reset_current(), which restores
+// *this mode as it shipped* instead of some average of all three.
 - (void)resetVision3D {
-    for (NSString *k in @[ @"dist", @"halfW", @"halfH", @"posH", @"sep", @"conv", @"convAuto", @"dim",
-                           @"vrStereo", @"vrScale", @"vrDist", @"vrHeight", @"vrRender", @"vrDim", @"vrLock", @"vrLookMode", @"vrLookSens", @"vrFlipCam",
-                           @"vrHands", @"vrHandSize", @"vrHandStyle", @"vrHandYaw", @"vrHandPitch", @"vrHandRoll",
-                           @"vrRHandYaw", @"vrRHandPitch", @"vrRHandRoll",
-                           @"vrHandOffX", @"vrHandOffY", @"vrHandOffZ",
-                           @"vrGestureGrab", @"vrGesturePunch", @"vrPunchSpeed", @"vrInputNative" ]) {
+    NSArray<NSString *> *keys;
+    if (sm64_vr_spike_running) {
+        // In VR: leave every flat-panel/stereo key alone, and leave the per-mode
+        // placement to the preset table below.
+        keys = @[ @"vrStereo", @"vrRender", @"vrDim", @"vrLock",
+                  @"vrLookMode", @"vrLookSens", @"vrFlipCam", @"vrMsaa",
+                  @"vrHands", @"vrHandSize", @"vrGestureGrab", @"vrGesturePunch",
+                  @"vrPunchSpeed" ];
+    } else {
+        // On the flat panel: only the panel's own settings.
+        keys = @[ @"dist", @"halfW", @"halfH", @"posH", @"sep", @"conv",
+                  @"convAuto", @"dim" ];
+    }
+    for (NSString *k in keys) {
         [NSUserDefaults.standardUserDefaults
             removeObjectForKey:[@"sm64vp3d." stringByAppendingString:k]];
     }
+    if (sm64_vr_spike_running) { sm64_vr_preset_reset_current(); }
     sm64_3d_apply_settings();
     [self.tableView reloadData];
 }

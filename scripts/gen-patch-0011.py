@@ -586,16 +586,11 @@ static Gfx *sm64_gfx_build_hands_dl(void) {
        walk the candidates instead of costing a round each. Culling is off for all
        of them: a hand seen from the wrong side of its winding vanishes, and that
        would read as a pose bug rather than a material one. */
-    /* ROUNDED, not truncated. The sheet's slider is continuous 0..3, so
-       truncation made style 3 — the lit one, and the only one that treats his
-       vertices as the NORMALS they are — reachable ONLY at exactly 3.0. Austin
-       slid it to 2.91, landed on style 2, and got the documented
-       normals-read-as-colours trap: iridescent rainbow facets, which is exactly
-       what a normal vector displayed as RGB looks like. That was my UI bug
-       presenting as a rendering bug. */
-    int style = (int) (sm64_3d_setting_f("vrHandStyle", SM64_DEF_VRHANDSTYLE) + 0.5f);
-    if (style < 0) { style = 0; }
-    if (style > 3) { style = 3; }
+    /* The material is FIXED at the lit style now. The other three existed to
+       find this one — Austin walked them on device and style 3 is the answer:
+       it is the only candidate that treats Mario's vertices as the NORMALS they
+       are, so his gloves read white and shade with the geometry. */
+    const int style = SM64_VR_HAND_STYLE;
 
     Gfx *g = dl;
     gDPPipeSync(g++);

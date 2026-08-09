@@ -358,6 +358,7 @@ struct SM64VisionApp: App {
         // The shape of the recorded trap: a style SET with more than one member,
         // switched live. A computed Binding rather than @State so the loop can
         // drive it from C through the published flag.
+        .upperLimbVisibility(.hidden)
         .immersionStyle(selection: Binding<ImmersionStyle>(
             get: {
                 NSLog("[vrspike] Swift: immersionStyle READ -> \(model.vrSpikeFull ? ".full" : ".mixed")")
@@ -370,6 +371,7 @@ struct SM64VisionApp: App {
                 sm64SpawnVRSpike(lr, 3)
             }
         }
+        .upperLimbVisibility(.hidden)
         .immersionStyle(selection: .constant(.full), in: .full)
     }
 }

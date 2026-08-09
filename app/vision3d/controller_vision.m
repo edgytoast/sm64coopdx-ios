@@ -232,9 +232,13 @@ static s8 vr_to_stick(float v) {
 // currently working. Fable's process rule after 1.1.2.22, and the whole point:
 // a bad experiment must cost a toggle, not a device round. The SDL filter reads
 // this too, so both halves of the decision move together and can never disagree.
-int sm64_vr_input_native_enabled(void) {
-    return sm64_3d_setting_f("vrInputNative", SM64_DEF_VRINPUTNATIVE) > 0.5f;
-}
+// NOT a setting any more (Austin, 2026-08-09: "wouldn't this be automatic?" —
+// yes). Declaring SpatialGamepad removes the aggregate MFi device, so SDL has
+// nothing left it can drive for a Sense pair: the toggle's other position was
+// simply "broken". An ordinary gamepad is unaffected either way — it is not
+// spatial, so the SDL filter never sees it and SDL keeps driving it with the
+// player's own binds, which is exactly what should happen.
+int sm64_vr_input_native_enabled(void) { return 1; }
 
 // Name-agnostic fallbacks (Fable): a naming surprise should degrade, not kill
 // the pad. The constants are tried first; these find the element by shape.

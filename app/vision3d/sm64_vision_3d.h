@@ -253,32 +253,35 @@ void sm64_3d_apply_settings(void);
 // on hardware that turns out not to be trackable this costs a flag test and
 // changes nothing on screen.
 #define SM64_DEF_VRHANDS     1.0f
-#define SM64_DEF_VRHANDSIZE  0.16f   // Austin's dialled-in value, device 2026-08-09
+// Hand size, shown to players as a whole number 1..20 rather than as the raw
+// multiplier — "0.16" means nothing to anyone. 16 is Austin's device value.
+#define SM64_DEF_VRHANDSIZE  16.0f
+#define SM64_VR_HANDSIZE_DIV 100.0f
 
-// HAND ORIENTATION, mirrored, from the values Austin arrived at by hand:
-//   L(yaw 79.40, pitch -56.19, roll -23.24)  R(yaw 101.01, pitch 69.31, roll -16.89)
-// Three relationships are visible in those numbers and are what the mirroring is
-// built on, rather than an assumed convention:
-//   * YAW is supplementary about 90 deg (79.40 + 101.01 = 180.41) -> mirror as
-//     90-d and 90+d.
-//   * PITCH is sign-flipped (-56 vs +69) -> mirror as -p and +p.
-//   * ROLL kept the SAME sign on both hands (-23 vs -17), so it is NOT mirrored;
-//     it is one common value.
-// Every range below brackets its default tightly, because these are precision
-// controls now rather than a search: a full -180..180 sweep made single degrees
-// impossible to hit.
-#define SM64_DEF_VRHANDYAW   80.0f    // left; right is 180 - this
-#define SM64_DEF_VRHANDPITCH -62.0f   // left; right is -this
-#define SM64_DEF_VRHANDROLL  -20.0f   // both hands
-#define SM64_DEF_VRRHANDYAW  100.0f
-#define SM64_DEF_VRRHANDPITCH 62.0f
-#define SM64_DEF_VRRHANDROLL -20.0f
-#define SM64_VR_ANGLE_SPAN   45.0f    // +/- around each default
-
-// Position offset, metres, hand frame.
-#define SM64_DEF_VRHANDOFFZ  -0.06f   // Austin's "out (fwd)"
-#define SM64_DEF_VRHANDOFFY   0.0f
-#define SM64_DEF_VRHANDOFFX   0.0f
+// HAND ORIENTATION — HARDCODED from what Austin arrived at on device
+// (2026-08-09), nudged only enough to make the two hands symmetric. He had
+// L(88.96, -17.00, -20.00) and R(97.65, +17.00, -20.00): pitch was already a
+// clean +/-17 mirror and roll already matched at -20, so only yaw needed
+// evening, to 89 / 98.
+//
+// The mirror centre is 93.5, NOT 90, and that is not a bug to "correct".
+// Mario's left and right hands are separate meshes rather than one mesh
+// reflected, so nothing requires their correction to straddle the sagittal
+// plane. Austin's eye found the real number; the geometry has no opinion.
+//
+// These stopped being settings once they were found: they describe how ARKit's
+// held-controller frame relates to Mario's hand mesh, which is a property of two
+// models, not a player preference. The sliders that found them are gone.
+#define SM64_VR_HAND_L_YAW    89.0f
+#define SM64_VR_HAND_L_PITCH -17.0f
+#define SM64_VR_HAND_L_ROLL  -20.0f
+#define SM64_VR_HAND_R_YAW    98.0f
+#define SM64_VR_HAND_R_PITCH  17.0f
+#define SM64_VR_HAND_R_ROLL  -20.0f
+#define SM64_VR_HAND_OFF_Z   -0.07f   // metres, forward out of the grip
+#define SM64_VR_HAND_OFF_Y    0.0f
+#define SM64_VR_HAND_OFF_X    0.0f
+#define SM64_VR_HAND_STYLE    3       // lit; the other three were search scaffolding
 
 #define SM64_DEF_VRGESTUREGRAB  0.0f
 #define SM64_DEF_VRGESTUREPUNCH 0.0f

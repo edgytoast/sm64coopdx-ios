@@ -123,7 +123,7 @@ WHAT IS NOT TOUCHED
 
 --- /dev/null
 +++ b/src/pc/vision3d/sm64_vision_3d.h
-@@ -0,0 +1,301 @@
+@@ -0,0 +1,313 @@
 +#ifndef SM64_VISION_3D_H
 +#define SM64_VISION_3D_H
 +
@@ -379,21 +379,33 @@ WHAT IS NOT TOUCHED
 +// on hardware that turns out not to be trackable this costs a flag test and
 +// changes nothing on screen.
 +#define SM64_DEF_VRHANDS     1.0f
-+#define SM64_DEF_VRHANDSIZE  0.30f   // multiplier on Mario's own hand geometry
-+// Hand orientation offset, degrees. Mario's hand mesh and ARKit's held-controller
-+// axes do not agree, and the mismatch is not derivable from either side — see
-+// sm64_vr_hand_rotation(). Tunable rather than guessed.
-+#define SM64_DEF_VRHANDYAW   0.0f
-+#define SM64_DEF_VRHANDPITCH 0.0f
-+#define SM64_DEF_VRHANDROLL  0.0f
-+// Physical hand gestures, both OFF by default (Austin: "I imagine most would
-+// leave these off, but as an option for VR hand controls"). Grab closes on
-+// something grabbable when your HAND reaches it rather than when Mario does;
-+// punch fires on a forward thrust of the controller, measured from the
-+// accessory's own velocity rather than from a position delta we would have to
-+// difference ourselves.
-+// Right-hand rotation reuses the left's defaults; the KEYS differ so each hand
-+// is dialled independently (vrRHand* vs vrHand*).
++#define SM64_DEF_VRHANDSIZE  0.16f   // Austin's dialled-in value, device 2026-08-09
++
++// HAND ORIENTATION, mirrored, from the values Austin arrived at by hand:
++//   L(yaw 79.40, pitch -56.19, roll -23.24)  R(yaw 101.01, pitch 69.31, roll -16.89)
++// Three relationships are visible in those numbers and are what the mirroring is
++// built on, rather than an assumed convention:
++//   * YAW is supplementary about 90 deg (79.40 + 101.01 = 180.41) -> mirror as
++//     90-d and 90+d.
++//   * PITCH is sign-flipped (-56 vs +69) -> mirror as -p and +p.
++//   * ROLL kept the SAME sign on both hands (-23 vs -17), so it is NOT mirrored;
++//     it is one common value.
++// Every range below brackets its default tightly, because these are precision
++// controls now rather than a search: a full -180..180 sweep made single degrees
++// impossible to hit.
++#define SM64_DEF_VRHANDYAW   80.0f    // left; right is 180 - this
++#define SM64_DEF_VRHANDPITCH -62.0f   // left; right is -this
++#define SM64_DEF_VRHANDROLL  -20.0f   // both hands
++#define SM64_DEF_VRRHANDYAW  100.0f
++#define SM64_DEF_VRRHANDPITCH 62.0f
++#define SM64_DEF_VRRHANDROLL -20.0f
++#define SM64_VR_ANGLE_SPAN   45.0f    // +/- around each default
++
++// Position offset, metres, hand frame.
++#define SM64_DEF_VRHANDOFFZ  -0.06f   // Austin's "out (fwd)"
++#define SM64_DEF_VRHANDOFFY   0.0f
++#define SM64_DEF_VRHANDOFFX   0.0f
++
 +#define SM64_DEF_VRGESTUREGRAB  0.0f
 +#define SM64_DEF_VRGESTUREPUNCH 0.0f
 +#define SM64_DEF_VRPUNCHSPEED   1.6f   // metres/sec of forward hand speed
@@ -2168,7 +2180,7 @@ WHAT IS NOT TOUCHED
 +#endif // SM64_VISION_3D
 --- /dev/null
 +++ b/src/pc/vision3d/sm64_vision_settings.m
-@@ -0,0 +1,433 @@
+@@ -0,0 +1,463 @@
 +// sm64_vision_settings.m — the "Vision Pro 3D" settings table.
 +//
 +// Ported from vkQuake-ios ios/shell/ios_settings.m's "Vision Pro 3D" section,
@@ -2351,23 +2363,23 @@ WHAT IS NOT TOUCHED
 +        // actually pose-tracked, so on hardware that cannot be tracked this row
 +        // does nothing visible — which is itself the answer worth having.
 +        mkrow(@"Show Mario Hands", @"vrHands", SM64_ROW_SWITCH, 0, 1, SM64_DEF_VRHANDS),
-+        mkrow(@"Hand Size", @"vrHandSize", SM64_ROW_SLIDER, 0.02, 2.0, SM64_DEF_VRHANDSIZE),
++        mkrow(@"Hand Size", @"vrHandSize", SM64_ROW_SLIDER, 0.05, 0.25, SM64_DEF_VRHANDSIZE),
 +        // 0 prim / 1 env / 2 shade / 3 lit. Walk these to find the one that
 +        // renders his gloves rather than black blobs.
 +        mkrow(@"Hand Style", @"vrHandStyle", SM64_ROW_SLIDER, 0, 3, SM64_DEF_VRHANDSTYLE),
 +        // Orientation, in degrees. Mario's hand mesh and ARKit's held-controller
 +        // axes do not agree and the correction is not derivable from either side,
 +        // so it is dialled rather than guessed.
-+        mkrow(@"L Hand Yaw", @"vrHandYaw", SM64_ROW_SLIDER, -180, 180, SM64_DEF_VRHANDYAW),
-+        mkrow(@"L Hand Pitch", @"vrHandPitch", SM64_ROW_SLIDER, -180, 180, SM64_DEF_VRHANDPITCH),
-+        mkrow(@"L Hand Roll", @"vrHandRoll", SM64_ROW_SLIDER, -180, 180, SM64_DEF_VRHANDROLL),
-+        mkrow(@"R Hand Yaw", @"vrRHandYaw", SM64_ROW_SLIDER, -180, 180, SM64_DEF_VRHANDYAW),
-+        mkrow(@"R Hand Pitch", @"vrRHandPitch", SM64_ROW_SLIDER, -180, 180, SM64_DEF_VRHANDPITCH),
-+        mkrow(@"R Hand Roll", @"vrRHandRoll", SM64_ROW_SLIDER, -180, 180, SM64_DEF_VRHANDROLL),
++        mkrow(@"L Hand Yaw", @"vrHandYaw", SM64_ROW_SLIDER, SM64_DEF_VRHANDYAW - SM64_VR_ANGLE_SPAN, SM64_DEF_VRHANDYAW + SM64_VR_ANGLE_SPAN, SM64_DEF_VRHANDYAW),
++        mkrow(@"L Hand Pitch", @"vrHandPitch", SM64_ROW_SLIDER, SM64_DEF_VRHANDPITCH - SM64_VR_ANGLE_SPAN, SM64_DEF_VRHANDPITCH + SM64_VR_ANGLE_SPAN, SM64_DEF_VRHANDPITCH),
++        mkrow(@"L Hand Roll", @"vrHandRoll", SM64_ROW_SLIDER, SM64_DEF_VRHANDROLL - SM64_VR_ANGLE_SPAN, SM64_DEF_VRHANDROLL + SM64_VR_ANGLE_SPAN, SM64_DEF_VRHANDROLL),
++        mkrow(@"R Hand Yaw", @"vrRHandYaw", SM64_ROW_SLIDER, SM64_DEF_VRRHANDYAW - SM64_VR_ANGLE_SPAN, SM64_DEF_VRRHANDYAW + SM64_VR_ANGLE_SPAN, SM64_DEF_VRRHANDYAW),
++        mkrow(@"R Hand Pitch", @"vrRHandPitch", SM64_ROW_SLIDER, SM64_DEF_VRRHANDPITCH - SM64_VR_ANGLE_SPAN, SM64_DEF_VRRHANDPITCH + SM64_VR_ANGLE_SPAN, SM64_DEF_VRRHANDPITCH),
++        mkrow(@"R Hand Roll", @"vrRHandRoll", SM64_ROW_SLIDER, SM64_DEF_VRRHANDROLL - SM64_VR_ANGLE_SPAN, SM64_DEF_VRRHANDROLL + SM64_VR_ANGLE_SPAN, SM64_DEF_VRRHANDROLL),
 +        // Position, metres, in the hand's own frame.
-+        mkrow(@"Hand Out (fwd)", @"vrHandOffZ", SM64_ROW_SLIDER, -0.3, 0.3, 0),
-+        mkrow(@"Hand Up", @"vrHandOffY", SM64_ROW_SLIDER, -0.3, 0.3, 0),
-+        mkrow(@"Hand Side", @"vrHandOffX", SM64_ROW_SLIDER, -0.3, 0.3, 0),
++        mkrow(@"Hand Out (fwd)", @"vrHandOffZ", SM64_ROW_SLIDER, -0.16, 0.04, SM64_DEF_VRHANDOFFZ),
++        mkrow(@"Hand Up", @"vrHandOffY", SM64_ROW_SLIDER, -0.10, 0.10, SM64_DEF_VRHANDOFFY),
++        mkrow(@"Hand Side", @"vrHandOffX", SM64_ROW_SLIDER, -0.10, 0.10, SM64_DEF_VRHANDOFFX),
 +        mkrow(@"Grab With Hands", @"vrGestureGrab", SM64_ROW_SWITCH, 0, 1, SM64_DEF_VRGESTUREGRAB),
 +        mkrow(@"Punch With Hands", @"vrGesturePunch", SM64_ROW_SWITCH, 0, 1, SM64_DEF_VRGESTUREPUNCH),
 +        mkrow(@"Punch Sensitivity", @"vrPunchSpeed", SM64_ROW_SLIDER, 0.5, 4.0, SM64_DEF_VRPUNCHSPEED),
@@ -2401,7 +2413,35 @@ WHAT IS NOT TOUCHED
 +}
 +
 +- (NSInteger)numberOfSectionsInTableView:(UITableView *)t { return _sections.count; }
-+- (NSInteger)tableView:(UITableView *)t numberOfRowsInSection:(NSInteger)s { return _rows[s].count; }
++// The hand-placement rows only mean anything while hands are ON, and there are
++// ten of them — left alone they bury every other VR setting under controls that
++// do nothing. Filtered out of the visible model rather than disabled, so the
++// section genuinely collapses (Austin, 2026-08-09).
++static BOOL sm64_row_is_hand_detail(SM64Row *r) {
++    static NSSet *keys = nil;
++    if (keys == nil) {
++        keys = [NSSet setWithArray:@[ @"vrHandSize", @"vrHandStyle",
++                                      @"vrHandYaw", @"vrHandPitch", @"vrHandRoll",
++                                      @"vrRHandYaw", @"vrRHandPitch", @"vrRHandRoll",
++                                      @"vrHandOffZ", @"vrHandOffY", @"vrHandOffX",
++                                      @"vrGestureGrab", @"vrGesturePunch", @"vrPunchSpeed" ]];
++    }
++    return [keys containsObject:r.key];
++}
++
++- (NSArray<SM64Row *> *)visibleRowsInSection:(NSInteger)s {
++    BOOL handsOn = sm64_3d_setting_f("vrHands", SM64_DEF_VRHANDS) > 0.5f;
++    if (handsOn) { return _rows[s]; }
++    NSMutableArray *out = [NSMutableArray array];
++    for (SM64Row *r in _rows[s]) {
++        if (!sm64_row_is_hand_detail(r)) { [out addObject:r]; }
++    }
++    return out;
++}
++
++- (NSInteger)tableView:(UITableView *)t numberOfRowsInSection:(NSInteger)s {
++    return [self visibleRowsInSection:s].count;
++}
 +
 +// Custom header views get a COMPRESSED height without an explicit delegate,
 +// which shoves the title up under the sheet's own Settings bar.
@@ -2440,7 +2480,7 @@ WHAT IS NOT TOUCHED
 +}
 +
 +- (UITableViewCell *)tableView:(UITableView *)t cellForRowAtIndexPath:(NSIndexPath *)ip {
-+    SM64Row *r = _rows[ip.section][ip.row];
++    SM64Row *r = [self visibleRowsInSection:ip.section][ip.row];
 +    UITableViewCell *c = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault
 +                                                reuseIdentifier:nil];
 +    c.textLabel.text = r.title;
@@ -2535,7 +2575,7 @@ WHAT IS NOT TOUCHED
 +}
 +
 +- (void)tableView:(UITableView *)t didSelectRowAtIndexPath:(NSIndexPath *)ip {
-+    SM64Row *r = _rows[ip.section][ip.row];
++    SM64Row *r = [self visibleRowsInSection:ip.section][ip.row];
 +    if (r.type != SM64_ROW_BUTTON) { return; }
 +    [t deselectRowAtIndexPath:ip animated:YES];
 +    if ([r.key isEqualToString:@"recenter"]) {
@@ -2572,6 +2612,8 @@ WHAT IS NOT TOUCHED
 +    // Item 6: toggling Auto changes whether the Focus Distance slider is enabled
 +    // and what value it shows — reload so that row reflects it immediately.
 +    if ([r.key isEqualToString:@"convAuto"]) { [self.tableView reloadData]; }
++    // Show Mario Hands adds or removes ten placement rows beneath it.
++    if ([r.key isEqualToString:@"vrHands"]) { [self.tableView reloadData]; }
 +}
 +
 +- (void)sliderChanged:(UISlider *)sl {
@@ -2621,7 +2663,7 @@ WHAT IS NOT TOUCHED
 +#import "sm64_vr_spike.h"
 --- /dev/null
 +++ b/src/pc/vision3d/SM64VisionApp.swift
-@@ -0,0 +1,368 @@
+@@ -0,0 +1,375 @@
 +// SM64VisionApp.swift — SwiftUI app entry for the visionOS target.
 +//
 +// visionOS requires a SwiftUI `App` to declare an `ImmersiveSpace` (UIKit cannot
@@ -2966,6 +3008,13 @@ WHAT IS NOT TOUCHED
 +            }
 +        }
 +        .immersionStyle(selection: .constant(.mixed), in: .mixed)
++        // YOUR arms, hidden — so the only hands in the world are Mario's.
++        // upperLimbVisibility is the precise tool for this: passthrough stays
++        // (the room, the furniture, the controllers you are holding are still
++        // there), but the system stops compositing your limbs over the render.
++        // Dimming the surroundings instead would have hidden the whole room to
++        // solve a problem that is only about two hands.
++        .upperLimbVisibility(.hidden)
 +
 +        ImmersiveSpace(id: "SM64-VR-SWITCH") {
 +            CompositorLayer(configuration: SM64CompositorConfiguration()) { lr in
@@ -4434,7 +4483,7 @@ WHAT IS NOT TOUCHED
 +#endif // DJUI_PANEL_VR_H
 --- /dev/null
 +++ b/src/pc/vision3d/djui_panel_vr.c
-@@ -0,0 +1,285 @@
+@@ -0,0 +1,288 @@
 +// djui_panel_vr.c — the in-game VR options panel (Options -> VR).
 +//
 +// See djui_panel_vr.h for why this exists and what belongs here rather than in
@@ -4475,15 +4524,18 @@ WHAT IS NOT TOUCHED
 +static bool sUiInputNative;      // EXPERIMENTAL: fixed VR layout instead of SDL
 +static unsigned int sUiHandSize; // percent of Mario's own hand geometry
 +static unsigned int sUiHandStyle; // 0 prim, 1 env, 2 shade, 3 lit
-+static unsigned int sUiHandYaw;   // +180 bias: DJUI sliders are unsigned
++static unsigned int sUiHandYaw;   // biased: DJUI sliders are unsigned
 +static unsigned int sUiHandPitch;
 +static unsigned int sUiHandRoll;
 +static unsigned int sUiRHandYaw, sUiRHandPitch, sUiRHandRoll;
 +static unsigned int sUiHandOffZ, sUiHandOffY, sUiHandOffX;  // +30 bias == -0.30..+0.30 m
-+#define VR_OFF_BIAS 30
++#define VR_OFF_BIAS 16   // cm; fwd spans -16..+4, up/side -10..+10
 +static bool sUiGrabHands;
 +static bool sUiPunchHands;
-+#define VR_ANGLE_BIAS 180        // slider 0..360 == -180..+180 degrees
++// Sliders span SM64_VR_ANGLE_SPAN either side of each default, so one step is a
++// degree instead of a coarse sweep — these are precision controls now.
++#define VR_ANG_LO(def) ((int)((def) - SM64_VR_ANGLE_SPAN))
++#define VR_ANG_N       ((unsigned int)(SM64_VR_ANGLE_SPAN * 2.0f))
 +
 +// DJUI sliders are unsigned, and the world can sit BELOW eye level (it usually
 +// should — you look down at a diorama), so the height row carries a bias.
@@ -4521,17 +4573,17 @@ WHAT IS NOT TOUCHED
 +    sUiFlipCam   = sm64_3d_setting_f("vrFlipCam", SM64_DEF_VRFLIPCAM) > 0.5f;
 +    sUiHands     = sm64_3d_setting_f("vrHands", SM64_DEF_VRHANDS) > 0.5f;
 +    sUiInputNative = sm64_3d_setting_f("vrInputNative", SM64_DEF_VRINPUTNATIVE) > 0.5f;
-+    sUiHandSize  = (unsigned int) (sm64_3d_setting_f("vrHandSize", SM64_DEF_VRHANDSIZE) * 100.0f);
++    sUiHandSize  = (unsigned int) (sm64_3d_setting_f("vrHandSize", SM64_DEF_VRHANDSIZE) * 100.0f);  // 5..25 == 0.05..0.25
 +    sUiHandStyle = (unsigned int) sm64_3d_setting_f("vrHandStyle", SM64_DEF_VRHANDSTYLE);
-+    sUiHandYaw   = (unsigned int) (sm64_3d_setting_f("vrHandYaw", SM64_DEF_VRHANDYAW) + VR_ANGLE_BIAS);
-+    sUiHandPitch = (unsigned int) (sm64_3d_setting_f("vrHandPitch", SM64_DEF_VRHANDPITCH) + VR_ANGLE_BIAS);
-+    sUiHandRoll  = (unsigned int) (sm64_3d_setting_f("vrHandRoll", SM64_DEF_VRHANDROLL) + VR_ANGLE_BIAS);
-+    sUiRHandYaw   = (unsigned int) (sm64_3d_setting_f("vrRHandYaw", SM64_DEF_VRHANDYAW) + VR_ANGLE_BIAS);
-+    sUiRHandPitch = (unsigned int) (sm64_3d_setting_f("vrRHandPitch", SM64_DEF_VRHANDPITCH) + VR_ANGLE_BIAS);
-+    sUiRHandRoll  = (unsigned int) (sm64_3d_setting_f("vrRHandRoll", SM64_DEF_VRHANDROLL) + VR_ANGLE_BIAS);
-+    sUiHandOffZ = (unsigned int) (sm64_3d_setting_f("vrHandOffZ", 0.0f) * 100.0f + VR_OFF_BIAS);
-+    sUiHandOffY = (unsigned int) (sm64_3d_setting_f("vrHandOffY", 0.0f) * 100.0f + VR_OFF_BIAS);
-+    sUiHandOffX = (unsigned int) (sm64_3d_setting_f("vrHandOffX", 0.0f) * 100.0f + VR_OFF_BIAS);
++    sUiHandYaw   = (unsigned int) (sm64_3d_setting_f("vrHandYaw", SM64_DEF_VRHANDYAW) - VR_ANG_LO(SM64_DEF_VRHANDYAW));
++    sUiHandPitch = (unsigned int) (sm64_3d_setting_f("vrHandPitch", SM64_DEF_VRHANDPITCH) - VR_ANG_LO(SM64_DEF_VRHANDPITCH));
++    sUiHandRoll  = (unsigned int) (sm64_3d_setting_f("vrHandRoll", SM64_DEF_VRHANDROLL) - VR_ANG_LO(SM64_DEF_VRHANDROLL));
++    sUiRHandYaw   = (unsigned int) (sm64_3d_setting_f("vrRHandYaw", SM64_DEF_VRRHANDYAW) - VR_ANG_LO(SM64_DEF_VRRHANDYAW));
++    sUiRHandPitch = (unsigned int) (sm64_3d_setting_f("vrRHandPitch", SM64_DEF_VRRHANDPITCH) - VR_ANG_LO(SM64_DEF_VRRHANDPITCH));
++    sUiRHandRoll  = (unsigned int) (sm64_3d_setting_f("vrRHandRoll", SM64_DEF_VRRHANDROLL) - VR_ANG_LO(SM64_DEF_VRRHANDROLL));
++    sUiHandOffZ = (unsigned int) (sm64_3d_setting_f("vrHandOffZ", SM64_DEF_VRHANDOFFZ) * 100.0f + VR_OFF_BIAS);
++    sUiHandOffY = (unsigned int) (sm64_3d_setting_f("vrHandOffY", SM64_DEF_VRHANDOFFY) * 100.0f + 10);
++    sUiHandOffX = (unsigned int) (sm64_3d_setting_f("vrHandOffX", SM64_DEF_VRHANDOFFX) * 100.0f + 10);
 +    sUiGrabHands  = sm64_3d_setting_f("vrGestureGrab", SM64_DEF_VRGESTUREGRAB) > 0.5f;
 +    sUiPunchHands = sm64_3d_setting_f("vrGesturePunch", SM64_DEF_VRGESTUREPUNCH) > 0.5f;
 +}
@@ -4561,15 +4613,15 @@ WHAT IS NOT TOUCHED
 +    sm64_3d_setting_set_f("vrInputNative", sUiInputNative ? 1.0f : 0.0f);
 +    sm64_3d_setting_set_f("vrHandSize", (float) sUiHandSize / 100.0f);
 +    sm64_3d_setting_set_f("vrHandStyle", (float) sUiHandStyle);
-+    sm64_3d_setting_set_f("vrHandYaw", (float) sUiHandYaw - VR_ANGLE_BIAS);
-+    sm64_3d_setting_set_f("vrHandPitch", (float) sUiHandPitch - VR_ANGLE_BIAS);
-+    sm64_3d_setting_set_f("vrHandRoll", (float) sUiHandRoll - VR_ANGLE_BIAS);
-+    sm64_3d_setting_set_f("vrRHandYaw", (float) sUiRHandYaw - VR_ANGLE_BIAS);
-+    sm64_3d_setting_set_f("vrRHandPitch", (float) sUiRHandPitch - VR_ANGLE_BIAS);
-+    sm64_3d_setting_set_f("vrRHandRoll", (float) sUiRHandRoll - VR_ANGLE_BIAS);
++    sm64_3d_setting_set_f("vrHandYaw", (float) sUiHandYaw + VR_ANG_LO(SM64_DEF_VRHANDYAW));
++    sm64_3d_setting_set_f("vrHandPitch", (float) sUiHandPitch + VR_ANG_LO(SM64_DEF_VRHANDPITCH));
++    sm64_3d_setting_set_f("vrHandRoll", (float) sUiHandRoll + VR_ANG_LO(SM64_DEF_VRHANDROLL));
++    sm64_3d_setting_set_f("vrRHandYaw", (float) sUiRHandYaw + VR_ANG_LO(SM64_DEF_VRRHANDYAW));
++    sm64_3d_setting_set_f("vrRHandPitch", (float) sUiRHandPitch + VR_ANG_LO(SM64_DEF_VRRHANDPITCH));
++    sm64_3d_setting_set_f("vrRHandRoll", (float) sUiRHandRoll + VR_ANG_LO(SM64_DEF_VRRHANDROLL));
 +    sm64_3d_setting_set_f("vrHandOffZ", ((float) sUiHandOffZ - VR_OFF_BIAS) / 100.0f);
-+    sm64_3d_setting_set_f("vrHandOffY", ((float) sUiHandOffY - VR_OFF_BIAS) / 100.0f);
-+    sm64_3d_setting_set_f("vrHandOffX", ((float) sUiHandOffX - VR_OFF_BIAS) / 100.0f);
++    sm64_3d_setting_set_f("vrHandOffY", ((float) sUiHandOffY - 10) / 100.0f);
++    sm64_3d_setting_set_f("vrHandOffX", ((float) sUiHandOffX - 10) / 100.0f);
 +    sm64_3d_setting_set_f("vrGestureGrab", sUiGrabHands ? 1.0f : 0.0f);
 +    sm64_3d_setting_set_f("vrGesturePunch", sUiPunchHands ? 1.0f : 0.0f);
 +    if (sUiMsaa < (unsigned int) VR_MSAA_COUNT) {
@@ -4661,17 +4713,17 @@ WHAT IS NOT TOUCHED
 +        // actually pose-tracked — see sm64_vr_hands.m for why that is an open
 +        // question on this hardware rather than a given.
 +        djui_checkbox_create(body, "Show Mario Hands", &sUiHands, vr_panel_push);
-+        djui_slider_create(body, "Hand Size", &sUiHandSize, 2, 200, vr_panel_push);
++        djui_slider_create(body, "Hand Size", &sUiHandSize, 5, 25, vr_panel_push);
 +        djui_slider_create(body, "Hand Style", &sUiHandStyle, 0, 3, vr_panel_push);
-+        djui_slider_create(body, "L Hand Yaw", &sUiHandYaw, 0, 360, vr_panel_push);
-+        djui_slider_create(body, "L Hand Pitch", &sUiHandPitch, 0, 360, vr_panel_push);
-+        djui_slider_create(body, "L Hand Roll", &sUiHandRoll, 0, 360, vr_panel_push);
-+        djui_slider_create(body, "R Hand Yaw", &sUiRHandYaw, 0, 360, vr_panel_push);
-+        djui_slider_create(body, "R Hand Pitch", &sUiRHandPitch, 0, 360, vr_panel_push);
-+        djui_slider_create(body, "R Hand Roll", &sUiRHandRoll, 0, 360, vr_panel_push);
-+        djui_slider_create(body, "Hand Out (fwd)", &sUiHandOffZ, 0, 60, vr_panel_push);
-+        djui_slider_create(body, "Hand Up", &sUiHandOffY, 0, 60, vr_panel_push);
-+        djui_slider_create(body, "Hand Side", &sUiHandOffX, 0, 60, vr_panel_push);
++        djui_slider_create(body, "L Hand Yaw", &sUiHandYaw, 0, VR_ANG_N, vr_panel_push);
++        djui_slider_create(body, "L Hand Pitch", &sUiHandPitch, 0, VR_ANG_N, vr_panel_push);
++        djui_slider_create(body, "L Hand Roll", &sUiHandRoll, 0, VR_ANG_N, vr_panel_push);
++        djui_slider_create(body, "R Hand Yaw", &sUiRHandYaw, 0, VR_ANG_N, vr_panel_push);
++        djui_slider_create(body, "R Hand Pitch", &sUiRHandPitch, 0, VR_ANG_N, vr_panel_push);
++        djui_slider_create(body, "R Hand Roll", &sUiRHandRoll, 0, VR_ANG_N, vr_panel_push);
++        djui_slider_create(body, "Hand Out (fwd)", &sUiHandOffZ, 0, 20, vr_panel_push);
++        djui_slider_create(body, "Hand Up", &sUiHandOffY, 0, 20, vr_panel_push);
++        djui_slider_create(body, "Hand Side", &sUiHandOffX, 0, 20, vr_panel_push);
 +        djui_checkbox_create(body, "Grab With Hands", &sUiGrabHands, vr_panel_push);
 +        djui_checkbox_create(body, "Punch With Hands", &sUiPunchHands, vr_panel_push);
 +        // EXPERIMENTAL, default OFF. On: the Sense pair leaves SDL and is driven
@@ -5730,7 +5782,7 @@ WHAT IS NOT TOUCHED
 +#endif // SM64_VR_HANDS_H
 --- /dev/null
 +++ b/src/pc/vision3d/sm64_vr_hands.m
-@@ -0,0 +1,501 @@
+@@ -0,0 +1,504 @@
 +// sm64_vr_hands.m — accessory poses, so Mario's hands can be YOUR hands.
 +//
 +// THE OPEN QUESTION THIS FILE EXISTS TO ANSWER. On this system the PSVR2 Sense
@@ -5832,9 +5884,12 @@ WHAT IS NOT TOUCHED
 +static simd_float4x4 sm64_vr_hand_rotation(int hand) {
 +    const float d2r = 3.14159265f / 180.0f;
 +    const int R = (hand == SM64_VR_HAND_RIGHT);
-+    float yaw   = sm64_3d_setting_f(R ? "vrRHandYaw"   : "vrHandYaw",   SM64_DEF_VRHANDYAW)   * d2r;
-+    float pitch = sm64_3d_setting_f(R ? "vrRHandPitch" : "vrHandPitch", SM64_DEF_VRHANDPITCH) * d2r;
-+    float roll  = sm64_3d_setting_f(R ? "vrRHandRoll"  : "vrHandRoll",  SM64_DEF_VRHANDROLL)  * d2r;
++    float yaw   = (R ? sm64_3d_setting_f("vrRHandYaw",   SM64_DEF_VRRHANDYAW)
++                     : sm64_3d_setting_f("vrHandYaw",    SM64_DEF_VRHANDYAW))   * d2r;
++    float pitch = (R ? sm64_3d_setting_f("vrRHandPitch", SM64_DEF_VRRHANDPITCH)
++                     : sm64_3d_setting_f("vrHandPitch",  SM64_DEF_VRHANDPITCH)) * d2r;
++    float roll  = (R ? sm64_3d_setting_f("vrRHandRoll",  SM64_DEF_VRRHANDROLL)
++                     : sm64_3d_setting_f("vrHandRoll",   SM64_DEF_VRHANDROLL))  * d2r;
 +    float cy = cosf(yaw),   sy = sinf(yaw);
 +    float cp = cosf(pitch), sp = sinf(pitch);
 +    float cr = cosf(roll),  sr = sinf(roll);
@@ -5850,9 +5905,9 @@ WHAT IS NOT TOUCHED
 +    simd_float4x4 M = simd_mul(Ry, simd_mul(Rp, Rr));
 +    // Position offset in METRES, in the hand's own frame: X right, Y up, Z back
 +    // (so a positive "forward" pushes along -Z, which is where the hand points).
-+    M.columns[3].x =  sm64_3d_setting_f("vrHandOffX", 0.0f);
-+    M.columns[3].y =  sm64_3d_setting_f("vrHandOffY", 0.0f);
-+    M.columns[3].z = -sm64_3d_setting_f("vrHandOffZ", 0.0f);
++    M.columns[3].x =  sm64_3d_setting_f("vrHandOffX", SM64_DEF_VRHANDOFFX);
++    M.columns[3].y =  sm64_3d_setting_f("vrHandOffY", SM64_DEF_VRHANDOFFY);
++    M.columns[3].z = -sm64_3d_setting_f("vrHandOffZ", SM64_DEF_VRHANDOFFZ);
 +    return M;
 +}
 +

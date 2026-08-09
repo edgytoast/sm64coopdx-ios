@@ -99,9 +99,12 @@ static float sm64_vr_hands_scale(void) {
 static simd_float4x4 sm64_vr_hand_rotation(int hand) {
     const float d2r = 3.14159265f / 180.0f;
     const int R = (hand == SM64_VR_HAND_RIGHT);
-    float yaw   = sm64_3d_setting_f(R ? "vrRHandYaw"   : "vrHandYaw",   SM64_DEF_VRHANDYAW)   * d2r;
-    float pitch = sm64_3d_setting_f(R ? "vrRHandPitch" : "vrHandPitch", SM64_DEF_VRHANDPITCH) * d2r;
-    float roll  = sm64_3d_setting_f(R ? "vrRHandRoll"  : "vrHandRoll",  SM64_DEF_VRHANDROLL)  * d2r;
+    float yaw   = (R ? sm64_3d_setting_f("vrRHandYaw",   SM64_DEF_VRRHANDYAW)
+                     : sm64_3d_setting_f("vrHandYaw",    SM64_DEF_VRHANDYAW))   * d2r;
+    float pitch = (R ? sm64_3d_setting_f("vrRHandPitch", SM64_DEF_VRRHANDPITCH)
+                     : sm64_3d_setting_f("vrHandPitch",  SM64_DEF_VRHANDPITCH)) * d2r;
+    float roll  = (R ? sm64_3d_setting_f("vrRHandRoll",  SM64_DEF_VRRHANDROLL)
+                     : sm64_3d_setting_f("vrHandRoll",   SM64_DEF_VRHANDROLL))  * d2r;
     float cy = cosf(yaw),   sy = sinf(yaw);
     float cp = cosf(pitch), sp = sinf(pitch);
     float cr = cosf(roll),  sr = sinf(roll);
@@ -117,9 +120,9 @@ static simd_float4x4 sm64_vr_hand_rotation(int hand) {
     simd_float4x4 M = simd_mul(Ry, simd_mul(Rp, Rr));
     // Position offset in METRES, in the hand's own frame: X right, Y up, Z back
     // (so a positive "forward" pushes along -Z, which is where the hand points).
-    M.columns[3].x =  sm64_3d_setting_f("vrHandOffX", 0.0f);
-    M.columns[3].y =  sm64_3d_setting_f("vrHandOffY", 0.0f);
-    M.columns[3].z = -sm64_3d_setting_f("vrHandOffZ", 0.0f);
+    M.columns[3].x =  sm64_3d_setting_f("vrHandOffX", SM64_DEF_VRHANDOFFX);
+    M.columns[3].y =  sm64_3d_setting_f("vrHandOffY", SM64_DEF_VRHANDOFFY);
+    M.columns[3].z = -sm64_3d_setting_f("vrHandOffZ", SM64_DEF_VRHANDOFFZ);
     return M;
 }
 

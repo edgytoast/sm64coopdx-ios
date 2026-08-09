@@ -342,6 +342,13 @@ struct SM64VisionApp: App {
             }
         }
         .immersionStyle(selection: .constant(.mixed), in: .mixed)
+        // YOUR arms, hidden — so the only hands in the world are Mario's.
+        // upperLimbVisibility is the precise tool for this: passthrough stays
+        // (the room, the furniture, the controllers you are holding are still
+        // there), but the system stops compositing your limbs over the render.
+        // Dimming the surroundings instead would have hidden the whole room to
+        // solve a problem that is only about two hands.
+        .upperLimbVisibility(.hidden)
 
         ImmersiveSpace(id: "SM64-VR-SWITCH") {
             CompositorLayer(configuration: SM64CompositorConfiguration()) { lr in

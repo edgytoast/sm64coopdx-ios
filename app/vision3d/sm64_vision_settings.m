@@ -180,23 +180,23 @@ static __weak SM64SettingsVC *g_settingsVC = nil;
         // actually pose-tracked, so on hardware that cannot be tracked this row
         // does nothing visible — which is itself the answer worth having.
         mkrow(@"Show Mario Hands", @"vrHands", SM64_ROW_SWITCH, 0, 1, SM64_DEF_VRHANDS),
-        mkrow(@"Hand Size", @"vrHandSize", SM64_ROW_SLIDER, 0.02, 2.0, SM64_DEF_VRHANDSIZE),
+        mkrow(@"Hand Size", @"vrHandSize", SM64_ROW_SLIDER, 0.05, 0.25, SM64_DEF_VRHANDSIZE),
         // 0 prim / 1 env / 2 shade / 3 lit. Walk these to find the one that
         // renders his gloves rather than black blobs.
         mkrow(@"Hand Style", @"vrHandStyle", SM64_ROW_SLIDER, 0, 3, SM64_DEF_VRHANDSTYLE),
         // Orientation, in degrees. Mario's hand mesh and ARKit's held-controller
         // axes do not agree and the correction is not derivable from either side,
         // so it is dialled rather than guessed.
-        mkrow(@"L Hand Yaw", @"vrHandYaw", SM64_ROW_SLIDER, -180, 180, SM64_DEF_VRHANDYAW),
-        mkrow(@"L Hand Pitch", @"vrHandPitch", SM64_ROW_SLIDER, -180, 180, SM64_DEF_VRHANDPITCH),
-        mkrow(@"L Hand Roll", @"vrHandRoll", SM64_ROW_SLIDER, -180, 180, SM64_DEF_VRHANDROLL),
-        mkrow(@"R Hand Yaw", @"vrRHandYaw", SM64_ROW_SLIDER, -180, 180, SM64_DEF_VRHANDYAW),
-        mkrow(@"R Hand Pitch", @"vrRHandPitch", SM64_ROW_SLIDER, -180, 180, SM64_DEF_VRHANDPITCH),
-        mkrow(@"R Hand Roll", @"vrRHandRoll", SM64_ROW_SLIDER, -180, 180, SM64_DEF_VRHANDROLL),
+        mkrow(@"L Hand Yaw", @"vrHandYaw", SM64_ROW_SLIDER, SM64_DEF_VRHANDYAW - SM64_VR_ANGLE_SPAN, SM64_DEF_VRHANDYAW + SM64_VR_ANGLE_SPAN, SM64_DEF_VRHANDYAW),
+        mkrow(@"L Hand Pitch", @"vrHandPitch", SM64_ROW_SLIDER, SM64_DEF_VRHANDPITCH - SM64_VR_ANGLE_SPAN, SM64_DEF_VRHANDPITCH + SM64_VR_ANGLE_SPAN, SM64_DEF_VRHANDPITCH),
+        mkrow(@"L Hand Roll", @"vrHandRoll", SM64_ROW_SLIDER, SM64_DEF_VRHANDROLL - SM64_VR_ANGLE_SPAN, SM64_DEF_VRHANDROLL + SM64_VR_ANGLE_SPAN, SM64_DEF_VRHANDROLL),
+        mkrow(@"R Hand Yaw", @"vrRHandYaw", SM64_ROW_SLIDER, SM64_DEF_VRRHANDYAW - SM64_VR_ANGLE_SPAN, SM64_DEF_VRRHANDYAW + SM64_VR_ANGLE_SPAN, SM64_DEF_VRRHANDYAW),
+        mkrow(@"R Hand Pitch", @"vrRHandPitch", SM64_ROW_SLIDER, SM64_DEF_VRRHANDPITCH - SM64_VR_ANGLE_SPAN, SM64_DEF_VRRHANDPITCH + SM64_VR_ANGLE_SPAN, SM64_DEF_VRRHANDPITCH),
+        mkrow(@"R Hand Roll", @"vrRHandRoll", SM64_ROW_SLIDER, SM64_DEF_VRRHANDROLL - SM64_VR_ANGLE_SPAN, SM64_DEF_VRRHANDROLL + SM64_VR_ANGLE_SPAN, SM64_DEF_VRRHANDROLL),
         // Position, metres, in the hand's own frame.
-        mkrow(@"Hand Out (fwd)", @"vrHandOffZ", SM64_ROW_SLIDER, -0.3, 0.3, 0),
-        mkrow(@"Hand Up", @"vrHandOffY", SM64_ROW_SLIDER, -0.3, 0.3, 0),
-        mkrow(@"Hand Side", @"vrHandOffX", SM64_ROW_SLIDER, -0.3, 0.3, 0),
+        mkrow(@"Hand Out (fwd)", @"vrHandOffZ", SM64_ROW_SLIDER, -0.16, 0.04, SM64_DEF_VRHANDOFFZ),
+        mkrow(@"Hand Up", @"vrHandOffY", SM64_ROW_SLIDER, -0.10, 0.10, SM64_DEF_VRHANDOFFY),
+        mkrow(@"Hand Side", @"vrHandOffX", SM64_ROW_SLIDER, -0.10, 0.10, SM64_DEF_VRHANDOFFX),
         mkrow(@"Grab With Hands", @"vrGestureGrab", SM64_ROW_SWITCH, 0, 1, SM64_DEF_VRGESTUREGRAB),
         mkrow(@"Punch With Hands", @"vrGesturePunch", SM64_ROW_SWITCH, 0, 1, SM64_DEF_VRGESTUREPUNCH),
         mkrow(@"Punch Sensitivity", @"vrPunchSpeed", SM64_ROW_SLIDER, 0.5, 4.0, SM64_DEF_VRPUNCHSPEED),
@@ -230,7 +230,35 @@ static __weak SM64SettingsVC *g_settingsVC = nil;
 }
 
 - (NSInteger)numberOfSectionsInTableView:(UITableView *)t { return _sections.count; }
-- (NSInteger)tableView:(UITableView *)t numberOfRowsInSection:(NSInteger)s { return _rows[s].count; }
+// The hand-placement rows only mean anything while hands are ON, and there are
+// ten of them — left alone they bury every other VR setting under controls that
+// do nothing. Filtered out of the visible model rather than disabled, so the
+// section genuinely collapses (Austin, 2026-08-09).
+static BOOL sm64_row_is_hand_detail(SM64Row *r) {
+    static NSSet *keys = nil;
+    if (keys == nil) {
+        keys = [NSSet setWithArray:@[ @"vrHandSize", @"vrHandStyle",
+                                      @"vrHandYaw", @"vrHandPitch", @"vrHandRoll",
+                                      @"vrRHandYaw", @"vrRHandPitch", @"vrRHandRoll",
+                                      @"vrHandOffZ", @"vrHandOffY", @"vrHandOffX",
+                                      @"vrGestureGrab", @"vrGesturePunch", @"vrPunchSpeed" ]];
+    }
+    return [keys containsObject:r.key];
+}
+
+- (NSArray<SM64Row *> *)visibleRowsInSection:(NSInteger)s {
+    BOOL handsOn = sm64_3d_setting_f("vrHands", SM64_DEF_VRHANDS) > 0.5f;
+    if (handsOn) { return _rows[s]; }
+    NSMutableArray *out = [NSMutableArray array];
+    for (SM64Row *r in _rows[s]) {
+        if (!sm64_row_is_hand_detail(r)) { [out addObject:r]; }
+    }
+    return out;
+}
+
+- (NSInteger)tableView:(UITableView *)t numberOfRowsInSection:(NSInteger)s {
+    return [self visibleRowsInSection:s].count;
+}
 
 // Custom header views get a COMPRESSED height without an explicit delegate,
 // which shoves the title up under the sheet's own Settings bar.
@@ -269,7 +297,7 @@ static __weak SM64SettingsVC *g_settingsVC = nil;
 }
 
 - (UITableViewCell *)tableView:(UITableView *)t cellForRowAtIndexPath:(NSIndexPath *)ip {
-    SM64Row *r = _rows[ip.section][ip.row];
+    SM64Row *r = [self visibleRowsInSection:ip.section][ip.row];
     UITableViewCell *c = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault
                                                 reuseIdentifier:nil];
     c.textLabel.text = r.title;
@@ -364,7 +392,7 @@ static __weak SM64SettingsVC *g_settingsVC = nil;
 }
 
 - (void)tableView:(UITableView *)t didSelectRowAtIndexPath:(NSIndexPath *)ip {
-    SM64Row *r = _rows[ip.section][ip.row];
+    SM64Row *r = [self visibleRowsInSection:ip.section][ip.row];
     if (r.type != SM64_ROW_BUTTON) { return; }
     [t deselectRowAtIndexPath:ip animated:YES];
     if ([r.key isEqualToString:@"recenter"]) {
@@ -401,6 +429,8 @@ static __weak SM64SettingsVC *g_settingsVC = nil;
     // Item 6: toggling Auto changes whether the Focus Distance slider is enabled
     // and what value it shows — reload so that row reflects it immediately.
     if ([r.key isEqualToString:@"convAuto"]) { [self.tableView reloadData]; }
+    // Show Mario Hands adds or removes ten placement rows beneath it.
+    if ([r.key isEqualToString:@"vrHands"]) { [self.tableView reloadData]; }
 }
 
 - (void)sliderChanged:(UISlider *)sl {

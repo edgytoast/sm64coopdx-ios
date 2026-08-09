@@ -38,6 +38,15 @@ static bool sUiHands;            // draw Mario's hands on your controllers
 static bool sUiInputNative;      // EXPERIMENTAL: fixed VR layout instead of SDL
 static unsigned int sUiHandSize; // percent of Mario's own hand geometry
 static unsigned int sUiHandStyle; // 0 prim, 1 env, 2 shade, 3 lit
+static unsigned int sUiHandYaw;   // +180 bias: DJUI sliders are unsigned
+static unsigned int sUiHandPitch;
+static unsigned int sUiHandRoll;
+static unsigned int sUiRHandYaw, sUiRHandPitch, sUiRHandRoll;
+static unsigned int sUiHandOffZ, sUiHandOffY, sUiHandOffX;  // +30 bias == -0.30..+0.30 m
+#define VR_OFF_BIAS 30
+static bool sUiGrabHands;
+static bool sUiPunchHands;
+#define VR_ANGLE_BIAS 180        // slider 0..360 == -180..+180 degrees
 
 // DJUI sliders are unsigned, and the world can sit BELOW eye level (it usually
 // should — you look down at a diorama), so the height row carries a bias.
@@ -77,6 +86,17 @@ static void vr_panel_pull(void) {
     sUiInputNative = sm64_3d_setting_f("vrInputNative", SM64_DEF_VRINPUTNATIVE) > 0.5f;
     sUiHandSize  = (unsigned int) (sm64_3d_setting_f("vrHandSize", SM64_DEF_VRHANDSIZE) * 100.0f);
     sUiHandStyle = (unsigned int) sm64_3d_setting_f("vrHandStyle", SM64_DEF_VRHANDSTYLE);
+    sUiHandYaw   = (unsigned int) (sm64_3d_setting_f("vrHandYaw", SM64_DEF_VRHANDYAW) + VR_ANGLE_BIAS);
+    sUiHandPitch = (unsigned int) (sm64_3d_setting_f("vrHandPitch", SM64_DEF_VRHANDPITCH) + VR_ANGLE_BIAS);
+    sUiHandRoll  = (unsigned int) (sm64_3d_setting_f("vrHandRoll", SM64_DEF_VRHANDROLL) + VR_ANGLE_BIAS);
+    sUiRHandYaw   = (unsigned int) (sm64_3d_setting_f("vrRHandYaw", SM64_DEF_VRHANDYAW) + VR_ANGLE_BIAS);
+    sUiRHandPitch = (unsigned int) (sm64_3d_setting_f("vrRHandPitch", SM64_DEF_VRHANDPITCH) + VR_ANGLE_BIAS);
+    sUiRHandRoll  = (unsigned int) (sm64_3d_setting_f("vrRHandRoll", SM64_DEF_VRHANDROLL) + VR_ANGLE_BIAS);
+    sUiHandOffZ = (unsigned int) (sm64_3d_setting_f("vrHandOffZ", 0.0f) * 100.0f + VR_OFF_BIAS);
+    sUiHandOffY = (unsigned int) (sm64_3d_setting_f("vrHandOffY", 0.0f) * 100.0f + VR_OFF_BIAS);
+    sUiHandOffX = (unsigned int) (sm64_3d_setting_f("vrHandOffX", 0.0f) * 100.0f + VR_OFF_BIAS);
+    sUiGrabHands  = sm64_3d_setting_f("vrGestureGrab", SM64_DEF_VRGESTUREGRAB) > 0.5f;
+    sUiPunchHands = sm64_3d_setting_f("vrGesturePunch", SM64_DEF_VRGESTUREPUNCH) > 0.5f;
 }
 
 // Switching modes restores that mode's own numbers, so the sliders below have to
@@ -104,6 +124,17 @@ static void vr_panel_push(UNUSED struct DjuiBase *caller) {
     sm64_3d_setting_set_f("vrInputNative", sUiInputNative ? 1.0f : 0.0f);
     sm64_3d_setting_set_f("vrHandSize", (float) sUiHandSize / 100.0f);
     sm64_3d_setting_set_f("vrHandStyle", (float) sUiHandStyle);
+    sm64_3d_setting_set_f("vrHandYaw", (float) sUiHandYaw - VR_ANGLE_BIAS);
+    sm64_3d_setting_set_f("vrHandPitch", (float) sUiHandPitch - VR_ANGLE_BIAS);
+    sm64_3d_setting_set_f("vrHandRoll", (float) sUiHandRoll - VR_ANGLE_BIAS);
+    sm64_3d_setting_set_f("vrRHandYaw", (float) sUiRHandYaw - VR_ANGLE_BIAS);
+    sm64_3d_setting_set_f("vrRHandPitch", (float) sUiRHandPitch - VR_ANGLE_BIAS);
+    sm64_3d_setting_set_f("vrRHandRoll", (float) sUiRHandRoll - VR_ANGLE_BIAS);
+    sm64_3d_setting_set_f("vrHandOffZ", ((float) sUiHandOffZ - VR_OFF_BIAS) / 100.0f);
+    sm64_3d_setting_set_f("vrHandOffY", ((float) sUiHandOffY - VR_OFF_BIAS) / 100.0f);
+    sm64_3d_setting_set_f("vrHandOffX", ((float) sUiHandOffX - VR_OFF_BIAS) / 100.0f);
+    sm64_3d_setting_set_f("vrGestureGrab", sUiGrabHands ? 1.0f : 0.0f);
+    sm64_3d_setting_set_f("vrGesturePunch", sUiPunchHands ? 1.0f : 0.0f);
     if (sUiMsaa < (unsigned int) VR_MSAA_COUNT) {
         sm64_3d_setting_set_f("vrMsaa", (float) sMsaaSamples[sUiMsaa]);
     }
@@ -137,6 +168,11 @@ static void vr_panel_reset(UNUSED struct DjuiBase *caller) {
     sm64_3d_setting_set_f("vrInputNative", SM64_DEF_VRINPUTNATIVE);
     sm64_3d_setting_set_f("vrHandSize", SM64_DEF_VRHANDSIZE);
     sm64_3d_setting_set_f("vrHandStyle", SM64_DEF_VRHANDSTYLE);
+    sm64_3d_setting_set_f("vrHandYaw", SM64_DEF_VRHANDYAW);
+    sm64_3d_setting_set_f("vrHandPitch", SM64_DEF_VRHANDPITCH);
+    sm64_3d_setting_set_f("vrHandRoll", SM64_DEF_VRHANDROLL);
+    sm64_3d_setting_set_f("vrGestureGrab", SM64_DEF_VRGESTUREGRAB);
+    sm64_3d_setting_set_f("vrGesturePunch", SM64_DEF_VRGESTUREPUNCH);
     vr_panel_pull();
     sm64_3d_apply_settings();
     // No panel rebuild: DJUI sliders read *value when they RENDER
@@ -188,8 +224,19 @@ void djui_panel_vr_create(struct DjuiBase *caller) {
         // actually pose-tracked — see sm64_vr_hands.m for why that is an open
         // question on this hardware rather than a given.
         djui_checkbox_create(body, "Show Mario Hands", &sUiHands, vr_panel_push);
-        djui_slider_create(body, "Hand Size", &sUiHandSize, 30, 300, vr_panel_push);
+        djui_slider_create(body, "Hand Size", &sUiHandSize, 2, 200, vr_panel_push);
         djui_slider_create(body, "Hand Style", &sUiHandStyle, 0, 3, vr_panel_push);
+        djui_slider_create(body, "L Hand Yaw", &sUiHandYaw, 0, 360, vr_panel_push);
+        djui_slider_create(body, "L Hand Pitch", &sUiHandPitch, 0, 360, vr_panel_push);
+        djui_slider_create(body, "L Hand Roll", &sUiHandRoll, 0, 360, vr_panel_push);
+        djui_slider_create(body, "R Hand Yaw", &sUiRHandYaw, 0, 360, vr_panel_push);
+        djui_slider_create(body, "R Hand Pitch", &sUiRHandPitch, 0, 360, vr_panel_push);
+        djui_slider_create(body, "R Hand Roll", &sUiRHandRoll, 0, 360, vr_panel_push);
+        djui_slider_create(body, "Hand Out (fwd)", &sUiHandOffZ, 0, 60, vr_panel_push);
+        djui_slider_create(body, "Hand Up", &sUiHandOffY, 0, 60, vr_panel_push);
+        djui_slider_create(body, "Hand Side", &sUiHandOffX, 0, 60, vr_panel_push);
+        djui_checkbox_create(body, "Grab With Hands", &sUiGrabHands, vr_panel_push);
+        djui_checkbox_create(body, "Punch With Hands", &sUiPunchHands, vr_panel_push);
         // EXPERIMENTAL, default OFF. On: the Sense pair leaves SDL and is driven
         // by the fixed VR layout. Reachable from the game's own menu on purpose —
         // if it misbehaves you can turn it off from inside the headset, which is

@@ -253,7 +253,24 @@ void sm64_3d_apply_settings(void);
 // on hardware that turns out not to be trackable this costs a flag test and
 // changes nothing on screen.
 #define SM64_DEF_VRHANDS     1.0f
-#define SM64_DEF_VRHANDSIZE  1.0f    // multiplier on Mario's own hand geometry
+#define SM64_DEF_VRHANDSIZE  0.30f   // multiplier on Mario's own hand geometry
+// Hand orientation offset, degrees. Mario's hand mesh and ARKit's held-controller
+// axes do not agree, and the mismatch is not derivable from either side — see
+// sm64_vr_hand_rotation(). Tunable rather than guessed.
+#define SM64_DEF_VRHANDYAW   0.0f
+#define SM64_DEF_VRHANDPITCH 0.0f
+#define SM64_DEF_VRHANDROLL  0.0f
+// Physical hand gestures, both OFF by default (Austin: "I imagine most would
+// leave these off, but as an option for VR hand controls"). Grab closes on
+// something grabbable when your HAND reaches it rather than when Mario does;
+// punch fires on a forward thrust of the controller, measured from the
+// accessory's own velocity rather than from a position delta we would have to
+// difference ourselves.
+// Right-hand rotation reuses the left's defaults; the KEYS differ so each hand
+// is dialled independently (vrRHand* vs vrHand*).
+#define SM64_DEF_VRGESTUREGRAB  0.0f
+#define SM64_DEF_VRGESTUREPUNCH 0.0f
+#define SM64_DEF_VRPUNCHSPEED   1.6f   // metres/sec of forward hand speed
 // Who drives the Sense pair. ON by default as of 2026-08-08: declaring
 // SpatialGamepad removes the aggregate MFi device entirely, and SDL 2.32 —
 // which predates spatial controllers — can only open the two halves as raw

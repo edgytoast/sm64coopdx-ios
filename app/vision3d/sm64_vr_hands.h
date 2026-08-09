@@ -43,4 +43,10 @@ float sm64_vr_hands_get_scale(void);
 // so the answer has to be legible from inside.
 void sm64_vr_hands_status(char *buf, int len);
 
+// Physical gestures, both opt-in. punch() is edge-triggered and returns 1 on the
+// frame a thrust crosses the threshold; grab_enabled() says whether the grip
+// should close on reach rather than on Mario's own proximity.
+int sm64_vr_hand_punch(void);
+int sm64_vr_hand_grab_enabled(void);
+
 #endif // SM64_VR_HANDS_H

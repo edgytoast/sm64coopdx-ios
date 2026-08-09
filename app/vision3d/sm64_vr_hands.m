@@ -41,6 +41,7 @@
 #import <GameController/GameController.h>
 #import <ARKit/ARKit.h>
 #import <simd/simd.h>
+#include <math.h>
 
 #include "pc/vision3d/sm64_vr_hands.h"
 #include "pc/vision3d/sm64_vr_spike.h"   // first-person gate, camera-from-world
@@ -65,6 +66,7 @@ static ar_session_t sSession = NULL;
 static bool sProviderDirty = false;     // the accessory set changed; rebuild
 
 static simd_float4x4 sHandWorld[2];     // origin_from_anchor, metres
+static simd_float3   sHandVel[2];       // metres/sec, straight from ARKit
 static volatile int  sHandValid[2] = { 0, 0 };
 
 // The toggle and the size live in the SHARED settings store, not in statics
@@ -74,8 +76,51 @@ static int sm64_vr_hands_enabled(void) {
     return sm64_3d_setting_f("vrHands", SM64_DEF_VRHANDS) > 0.5f;
 }
 static float sm64_vr_hands_scale(void) {
+    // Range opened right down: Austin bottomed out the old 0.3 minimum with the
+    // hands still too big, and Mario's hand geometry is ROM-loaded so its extent
+    // cannot be measured at build time to normalise against. Direct control beats
+    // another round of me inferring the model's size from screenshots.
     float s = sm64_3d_setting_f("vrHandSize", SM64_DEF_VRHANDSIZE);
-    return (s >= 0.1f && s <= 10.0f) ? s : SM64_DEF_VRHANDSIZE;
+    return (s >= 0.01f && s <= 10.0f) ? s : SM64_DEF_VRHANDSIZE;
+}
+
+// Orientation offset. The accessory pose's axes are ARKit's convention for a
+// held controller; Mario's hand mesh has its own. Nothing guarantees they agree,
+// and on device the left hand points RIGHT from a comfortable grip. Rather than
+// guess the fixed correction and burn a round per guess, all three axes are
+// exposed and can be dialled in the headset — this is a tuning problem, so it
+// gets a tuning UI. Applied BETWEEN the pose and the model, so it rotates the
+// hand about its own origin rather than swinging it through the room.
+// PER HAND, because they are mirrored meshes on mirrored controllers and there
+// is no reason a single correction should suit both — Austin asked for enough
+// knobs to actually land it, and one shared set was not enough. Plus a position
+// offset, so a hand that sits correctly oriented but in the wrong place (behind
+// the grip, or inside the controller) can be pushed out in front.
+static simd_float4x4 sm64_vr_hand_rotation(int hand) {
+    const float d2r = 3.14159265f / 180.0f;
+    const int R = (hand == SM64_VR_HAND_RIGHT);
+    float yaw   = sm64_3d_setting_f(R ? "vrRHandYaw"   : "vrHandYaw",   SM64_DEF_VRHANDYAW)   * d2r;
+    float pitch = sm64_3d_setting_f(R ? "vrRHandPitch" : "vrHandPitch", SM64_DEF_VRHANDPITCH) * d2r;
+    float roll  = sm64_3d_setting_f(R ? "vrRHandRoll"  : "vrHandRoll",  SM64_DEF_VRHANDROLL)  * d2r;
+    float cy = cosf(yaw),   sy = sinf(yaw);
+    float cp = cosf(pitch), sp = sinf(pitch);
+    float cr = cosf(roll),  sr = sinf(roll);
+    simd_float4x4 Ry = matrix_identity_float4x4;
+    Ry.columns[0].x =  cy; Ry.columns[0].z = -sy;
+    Ry.columns[2].x =  sy; Ry.columns[2].z =  cy;
+    simd_float4x4 Rp = matrix_identity_float4x4;
+    Rp.columns[1].y =  cp; Rp.columns[1].z =  sp;
+    Rp.columns[2].y = -sp; Rp.columns[2].z =  cp;
+    simd_float4x4 Rr = matrix_identity_float4x4;
+    Rr.columns[0].x =  cr; Rr.columns[0].y =  sr;
+    Rr.columns[1].x = -sr; Rr.columns[1].y =  cr;
+    simd_float4x4 M = simd_mul(Ry, simd_mul(Rp, Rr));
+    // Position offset in METRES, in the hand's own frame: X right, Y up, Z back
+    // (so a positive "forward" pushes along -Z, which is where the hand points).
+    M.columns[3].x =  sm64_3d_setting_f("vrHandOffX", 0.0f);
+    M.columns[3].y =  sm64_3d_setting_f("vrHandOffY", 0.0f);
+    M.columns[3].z = -sm64_3d_setting_f("vrHandOffZ", 0.0f);
+    return M;
 }
 
 // Diagnostics: this is a feature whose first question is "does the hardware do
@@ -329,6 +374,10 @@ void sm64_vr_hands_poll(void) {
             }
             if (hand < 0) { return true; }
             sHandWorld[hand] = xf;
+            // Velocity comes from the anchor rather than from differencing
+            // positions ourselves: ARKit already has it, and a hand-rolled delta
+            // would be at the mercy of our own poll jitter.
+            sHandVel[hand] = ar_accessory_anchor_get_velocity(anchor);
             sHandValid[hand] = 1;
             seenMask |= (1 << hand);
             return true;
@@ -376,6 +425,13 @@ int sm64_vr_hand_matrix(int hand, float out[4][4]) {
     // same world scale camFromWorld multiplied in. The hand then renders at its
     // native game-unit size, which in first-person IS life size, because that is
     // what the first-person world scale means.
+    // Orientation + offset on the RIGHT of the pose, so the hand turns about its
+    // own origin instead of orbiting the controller. The offset inside that
+    // matrix is in METRES and is applied BEFORE the model-unit scale below, which
+    // is what keeps "3 cm forward" meaning 3 cm rather than 3 cm times whatever
+    // the hand-size slider happens to be.
+    M = simd_mul(M, sm64_vr_hand_rotation(hand));
+
     const float worldScale = sm64_vr_anticlip_world_scale();
     const float unitFix = (worldScale > 1.0f) ? (1.0f / worldScale) : 1.0f;
     const float s = sm64_vr_hands_scale() * unitFix;
@@ -410,6 +466,33 @@ void sm64_vr_hands_status(char *buf, int len) {
                  sLoadOK, sLastAnchorCount,
                  sHandValid[0] ? "L" : "-", sHandValid[1] ? "R" : "-");
     }
+}
+
+// A forward THRUST of either hand, for punch-with-hands. "Forward" is the hand's
+// own -Z after the same orientation offset the model uses, so the gesture agrees
+// with wherever the hand is actually pointing rather than with the room.
+// Edge-triggered: a punch fires once per thrust, and the hand must slow back down
+// before another can fire, or one shove would machine-gun the button.
+int sm64_vr_hand_punch(void) {
+    if (sm64_3d_setting_f("vrGesturePunch", SM64_DEF_VRGESTUREPUNCH) < 0.5f) { return 0; }
+    if (!sm64_vr_hands_enabled() || !sm64_vr_first_person_active()) { return 0; }
+    const float trip = sm64_3d_setting_f("vrPunchSpeed", SM64_DEF_VRPUNCHSPEED);
+    const float rearm = trip * 0.5f;
+    static int armed[2] = { 1, 1 };
+    int fired = 0;
+    for (int h = 0; h < 2; h++) {
+        if (!sHandValid[h]) { armed[h] = 1; continue; }
+        simd_float3 fwd = -sHandWorld[h].columns[2].xyz;   // the hand's own forward
+        float speed = simd_dot(sHandVel[h], simd_normalize(fwd));
+        if (armed[h] && speed > trip) { fired = 1; armed[h] = 0; }
+        else if (speed < rearm) { armed[h] = 1; }
+    }
+    return fired;
+}
+
+int sm64_vr_hand_grab_enabled(void) {
+    return sm64_3d_setting_f("vrGestureGrab", SM64_DEF_VRGESTUREGRAB) > 0.5f
+        && sm64_vr_hands_enabled() && sm64_vr_first_person_active();
 }
 
 int   sm64_vr_hands_get_enabled(void) { return sm64_vr_hands_enabled(); }

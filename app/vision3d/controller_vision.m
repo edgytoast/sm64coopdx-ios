@@ -347,6 +347,11 @@ static void controller_vision_read(OSContPad *pad) {
         if (grip && sm64_vr_grabbable_in_reach()) { pad->button |= B_BUTTON; }
     }
 
+    // PUNCH WITH HANDS (opt-in). B is punch, the same button the grip uses for
+    // grab — which is correct, because in SM64 they ARE one button: B grabs when
+    // something is grabbable and punches otherwise.
+    if (sm64_vr_hand_punch()) { pad->button |= B_BUTTON; }
+
     // LEFT STICK CLICK -> Z, the donor's second crouch.
     if (vr_button(L, GCInputThumbstickButton)) { pad->button |= Z_TRIG; }
 

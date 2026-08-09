@@ -180,10 +180,26 @@ static __weak SM64SettingsVC *g_settingsVC = nil;
         // actually pose-tracked, so on hardware that cannot be tracked this row
         // does nothing visible — which is itself the answer worth having.
         mkrow(@"Show Mario Hands", @"vrHands", SM64_ROW_SWITCH, 0, 1, SM64_DEF_VRHANDS),
-        mkrow(@"Hand Size", @"vrHandSize", SM64_ROW_SLIDER, 0.3, 3.0, SM64_DEF_VRHANDSIZE),
+        mkrow(@"Hand Size", @"vrHandSize", SM64_ROW_SLIDER, 0.02, 2.0, SM64_DEF_VRHANDSIZE),
         // 0 prim / 1 env / 2 shade / 3 lit. Walk these to find the one that
         // renders his gloves rather than black blobs.
         mkrow(@"Hand Style", @"vrHandStyle", SM64_ROW_SLIDER, 0, 3, SM64_DEF_VRHANDSTYLE),
+        // Orientation, in degrees. Mario's hand mesh and ARKit's held-controller
+        // axes do not agree and the correction is not derivable from either side,
+        // so it is dialled rather than guessed.
+        mkrow(@"L Hand Yaw", @"vrHandYaw", SM64_ROW_SLIDER, -180, 180, SM64_DEF_VRHANDYAW),
+        mkrow(@"L Hand Pitch", @"vrHandPitch", SM64_ROW_SLIDER, -180, 180, SM64_DEF_VRHANDPITCH),
+        mkrow(@"L Hand Roll", @"vrHandRoll", SM64_ROW_SLIDER, -180, 180, SM64_DEF_VRHANDROLL),
+        mkrow(@"R Hand Yaw", @"vrRHandYaw", SM64_ROW_SLIDER, -180, 180, SM64_DEF_VRHANDYAW),
+        mkrow(@"R Hand Pitch", @"vrRHandPitch", SM64_ROW_SLIDER, -180, 180, SM64_DEF_VRHANDPITCH),
+        mkrow(@"R Hand Roll", @"vrRHandRoll", SM64_ROW_SLIDER, -180, 180, SM64_DEF_VRHANDROLL),
+        // Position, metres, in the hand's own frame.
+        mkrow(@"Hand Out (fwd)", @"vrHandOffZ", SM64_ROW_SLIDER, -0.3, 0.3, 0),
+        mkrow(@"Hand Up", @"vrHandOffY", SM64_ROW_SLIDER, -0.3, 0.3, 0),
+        mkrow(@"Hand Side", @"vrHandOffX", SM64_ROW_SLIDER, -0.3, 0.3, 0),
+        mkrow(@"Grab With Hands", @"vrGestureGrab", SM64_ROW_SWITCH, 0, 1, SM64_DEF_VRGESTUREGRAB),
+        mkrow(@"Punch With Hands", @"vrGesturePunch", SM64_ROW_SWITCH, 0, 1, SM64_DEF_VRGESTUREPUNCH),
+        mkrow(@"Punch Sensitivity", @"vrPunchSpeed", SM64_ROW_SLIDER, 0.5, 4.0, SM64_DEF_VRPUNCHSPEED),
         // EXPERIMENTAL, default OFF. On: the Sense pair is taken away from SDL
         // and driven by the fixed VR layout. Off: SDL drives it exactly as it
         // does today. This switch exists so a bad experiment costs a toggle
@@ -241,7 +257,10 @@ static __weak SM64SettingsVC *g_settingsVC = nil;
 - (void)resetVision3D {
     for (NSString *k in @[ @"dist", @"halfW", @"halfH", @"posH", @"sep", @"conv", @"convAuto", @"dim",
                            @"vrStereo", @"vrScale", @"vrDist", @"vrHeight", @"vrRender", @"vrDim", @"vrLock", @"vrLookMode", @"vrLookSens", @"vrFlipCam",
-                           @"vrHands", @"vrHandSize", @"vrHandStyle", @"vrInputNative" ]) {
+                           @"vrHands", @"vrHandSize", @"vrHandStyle", @"vrHandYaw", @"vrHandPitch", @"vrHandRoll",
+                           @"vrRHandYaw", @"vrRHandPitch", @"vrRHandRoll",
+                           @"vrHandOffX", @"vrHandOffY", @"vrHandOffZ",
+                           @"vrGestureGrab", @"vrGesturePunch", @"vrPunchSpeed", @"vrInputNative" ]) {
         [NSUserDefaults.standardUserDefaults
             removeObjectForKey:[@"sm64vp3d." stringByAppendingString:k]];
     }

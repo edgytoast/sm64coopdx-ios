@@ -6,28 +6,6 @@
   "website": "https://github.com/rebelancap/sm64coopdx-ios",
   "tintColor": "#E60012",
   "iconURL": "https://raw.githubusercontent.com/rebelancap/sm64coopdx-ios/main/sidestore/assets/source-icon.png",
-  "apps": [
-    {
-      "name": "Super Mario 64 Co-op Deluxe",
-      "bundleIdentifier": "com.rebelancap.sm64coopdx",
-      "developerName": "rebelancap",
-      "subtitle": "Super Mario 64 Co-op Deluxe for Apple Vision Pro",
-      "localizedDescription": "Super Mario 64 Co-op Deluxe on Apple Vision Pro: the full game rendered natively on Metal, online co-op over CoopNet, and a world-locked stereoscopic 3D mode with live-tunable screen size, distance, depth, and focus. Ships with no game content; you supply your own Super Mario 64 (US) ROM.",
-      "iconURL": "https://raw.githubusercontent.com/rebelancap/sm64coopdx-ios/main/sidestore/assets/sm64coopdx.png",
-      "tintColor": "#E60012",
-      "category": "games",
-      "screenshotURLs": [],
-      "versions": [
-        {
-          "version": "1.2.0",
-          "date": "2026-08-09T08:33:43Z",
-          "localizedDescription": "## VR mode\n\nThe game in true stereo around you, in three view modes: a **diorama** on your floor, **third-person** with the world at your shoulder, and **first-person** at life size. Each remembers its own scale and placement.\n\n- Plays with any gamepad. **Tracked VR controllers** (visionOS spatial controllers, e.g. PSVR2 Sense) are optional, and draw **Mario's own hands** where yours are \u2014 with grab and punch gestures if you want them.\n- A real **sky dome**, built from the game's own skybox tiles, so the sky surrounds you instead of sitting flat.\n- Free / Turn / Snap stick look, stereo strength, world scale and height, dimming, recenter, and an optional Flip Cam that somersaults with Mario.\n- Menus and the act/star select stay on a flat world-locked screen.\n- 2x MSAA on the eye passes, and anti-clip so leaning into a wall doesn't put you inside it.\n\nTunable from the visionOS settings sheet or in-game Options \u2192 VR.\n\n## Fixes\n\n- The 2D window keeps its rounded corners\n- Fixed a Metal texture-lifetime bug that could paint stale textures over the sky\n\n## Credits\n\nVR mode owes its shape to [RaYRoD's Quest port](https://github.com/RaYRoD-TV/sm64coopdx-vr) \u2014 the sky dome is a direct port, tuning constants and all. Built on [sm64coopdx](https://github.com/coop-deluxe/sm64coopdx); iOS groundwork by [LeoManrique](https://github.com/LeoManrique/sm64coopdx-ios). You supply your own ROM.",
-          "downloadURL": "https://github.com/rebelancap/sm64coopdx-ios/releases/download/v1.2.0/sm64coopdx.ipa",
-          "size": 11319818,
-          "minOSVersion": "16.0"
-        }
-      ]
-    }
-  ],
+  "apps": [],
   "news": []
 }

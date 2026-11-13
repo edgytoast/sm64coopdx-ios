@@ -1,0 +1,21 @@
+# Keeps this copy current with github.com/rebelancap/sm64coopdx-ios, daily. This copy adds only
+# AVP-INSTALL.md and this file, so the merge doesn't conflict. If it fails:
+# - upstream changed its own workflow files, which this workflow's token may not write:
+#   press "Sync fork" on the repository page;
+# - upstream added its own AVP-INSTALL.md: list their repository in the AVP Ports Index instead.
+name: sync-upstream
+on:
+  schedule:
+    - cron: "23 6 * * *"
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Merge upstream main
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh api -X POST "repos/${GITHUB_REPOSITORY}/merge-upstream" -f branch=main

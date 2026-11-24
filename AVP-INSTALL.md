@@ -62,3 +62,7 @@ Upstream is vendored unmodified and pinned by commit. Every local change is a pa
 - VR has three views (a diorama on your floor, third person, and first person at life size), and menus stay on a flat world-locked screen.
 - Apps sideloaded with a free Apple account expire after 7 days (paid developer accounts last a year). SideStore refreshes them in the background; if the app stops launching, open SideStore and let it re-sign.
 - Super Mario 64 is © Nintendo. This project ships no Nintendo content; you supply your own ROM.
+
+## Support
+
+This fork keeps Super Mario 64 installable on Apple Vision Pro. It's maintained as part of the [AVP Ports Index](https://github.com/edgytoast/avp-ports-index), which tracks every port we can find and runs a safety check on each one. If this guide got you playing, you can [buy me a coffee](https://buymeacoffee.com/adminpz) to help keep it running.
